@@ -2,24 +2,23 @@
 
 > **For agentic workers:** This is a **planning** document (issue grouping + sequencing), not an implementation plan with checkboxes. For implementing a chosen slice, spawn a follow-up plan with `writing-plans` / `subagent-driven-development` per **AGENTS.md** and **workflow.md**.
 
-**Goal:** Turn the six open GitHub issues into **reviewable PR boundaries** aligned with **workflow.md** (“one cohesive PR when issues share one implementation; separate PRs when independent”).
+**Goal:** Define **reviewable PR boundaries** for the **in-scope** open issues (**#103, #104, #106**), aligned with **workflow.md** (“one cohesive PR when issues share one implementation; separate PRs when independent”).
 
 **Sources:** Parallel **explore** subagents (independent codebase maps) + `gh issue view` bodies + **AGENTS.md** / **workflow.md**.
 
 **Tech stack:** Go 1.24+, existing `cmd/mysql-mcp-server`, `internal/config`, `internal/util`, extended tools in `tools_extended.go`.
 
+**Out of scope for this document (revisit later):** **#24** (TiDB), **#64** / **#80** (local LLMs and `ask_nl_sql`, including any combined server-side NL→SQL track).
+
 ---
 
-## Subagent synthesis (high level)
+## Subagent synthesis (in-scope issues only)
 
 | Issue | Theme | Overlap with others |
 |-------|--------|---------------------|
 | **#104** | `explain_query` structured output + docs | Isolated to extended tools + README; **no** dependency on writes or connections |
 | **#103** | `write_query` + confirmation + audit | Core SQL path, validators, security tests; **different** subsystem from #106 |
 | **#106** | `add_connection` / HTTP persistence | `ConnectionManager`, optional HTTP; **different** security story from #103 |
-| **#24** | TiDB matrix + compatibility | DB-side; may need code fixes beyond Compose — **not** “CI only” until proven |
-| **#64** | Local LLMs (doc vs built-in client) | Overlaps **#80** only if #80 uses **server-side** LLM calls |
-| **#80** | `ask_nl_sql` | Can ship as **client-LLM** (schema/prompt bundle) **without** #64; server-side NL→SQL wants shared LLM config → pair with #64 |
 
 ---
 
@@ -41,19 +40,6 @@
 - New gated tool, DML-only validation, confirmation semantics, audit entries, disabled by default.
 - **Heavy security / integration tests**; land after or before #106 on a clean `main`, but **not in the same PR** as #106.
 
-### PR-D — issue #24 only (TiDB)
-
-- Compose service + CI matrix **plus** any compatibility fixes discovered; keep LLM work out of this PR.
-
-### PR-E — issues #64 + #80 **only if** product chooses **server-side** NL→SQL
-
-- Single config surface (OpenAI-compatible URL, model, timeouts) and one doc pass.
-- **Alternative:** **#80-first (client-LLM mode):** tool returns grounded prompt / suggested SQL for the **host** MCP client — then **#64** can be README-only in a **separate small PR**.
-
-### PR-F — issue #64 alone (documentation track)
-
-- If #80 stays client-driven, land **#64** as docs/examples only without blocking #80.
-
 ---
 
 ## Parallel agent rules (for implementation phase)
@@ -70,8 +56,6 @@ Per **AGENTS.md** / **workflow.md** / **dispatching-parallel-agents**:
 - `feature/issue-104-explain-structured` → **PR-A**
 - `feature/issue-106-add-connection` → **PR-B**
 - `feature/issue-103-write-query` → **PR-C**
-- `feature/issue-24-tidb-ci` → **PR-D**
-- `feature/issues-64-80-llm-nl-sql` → **PR-E** (only if combined scope agreed)
 
 ---
 
