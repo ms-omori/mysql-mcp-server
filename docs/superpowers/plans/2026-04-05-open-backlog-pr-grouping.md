@@ -4,6 +4,8 @@
 
 **Goal:** Define **reviewable PR boundaries** for the **in-scope** open issues (**#103, #104, #106**), aligned with **workflow.md** (“one cohesive PR when issues share one implementation; separate PRs when independent”).
 
+**Open issues checklist (vs GitHub):** Every currently **open** issue is either in the table below (**#103–#106**) or listed as **out of scope** (**#24, #64, #80**). Nothing is missing. For a tabular snapshot that includes deferred items, see **[workflow.md](../../../workflow.md)** → *Open backlog snapshot*.
+
 **Sources:** Parallel **explore** subagents (independent codebase maps) + `gh issue view` bodies + **AGENTS.md** / **workflow.md**.
 
 **Tech stack:** Go 1.24+, existing `cmd/mysql-mcp-server`, `internal/config`, `internal/util`, extended tools in `tools_extended.go`.
@@ -27,8 +29,8 @@
 ### PR-A — **Next PR (recommended): issue #104 only**
 
 - **Why next:** Smallest blast radius, clear ownership (`tools_extended.go`, `types.go`, tests, README), satisfies “document + deepen `explain_query`” without touching read-only guarantees or connection registry.
-- **Scope:** Wire `ExplainQueryInput.Format` (today unused), optional `EXPLAIN FORMAT=JSON` / `TREE`, normalize structured output; expand MCP description and README vs `run_query` + `EXPLAIN`.
-- **Verify:** `go test ./...`, extended-mode tests in `tools_extended_test.go`; CI parity per **workflow.md**.
+- **Scope:** Wire `ExplainQueryInput.Format` (today unused), optional `EXPLAIN FORMAT=JSON` / `TREE`, normalize structured output; expand MCP description and README vs `run_query` + `EXPLAIN`. Confirm **MySQL version / syntax** support for chosen formats (e.g. JSON vs TREE) and document **fallback** to traditional EXPLAIN where unsupported.
+- **Verify:** `go test ./...`, extended-mode tests in `tools_extended_test.go`, and **`http_test.go`** for **`/api/explain`** if HTTP behavior changes; CI parity per **workflow.md**.
 
 ### PR-B — issue #106 only (`add_connection`)
 
@@ -39,6 +41,8 @@
 
 - New gated tool, DML-only validation, confirmation semantics, audit entries, disabled by default.
 - **Heavy security / integration tests**; land after or before #106 on a clean `main`, but **not in the same PR** as #106.
+
+**PR-B + PR-C merge note:** Both will touch shared registration files (e.g. `main.go`, `types.go`, `tool_wrappers.go`). Land one, rebase the other—expect routine conflict resolution, not a reason to combine PRs.
 
 ---
 
@@ -61,6 +65,6 @@ Per **AGENTS.md** / **workflow.md** / **dispatching-parallel-agents**:
 
 ## Execution handoff
 
-**Default “next PR”:** open **PR-A (#104)** from a fresh branch off `main`, run **CI parity** from **workflow.md**, then open the GitHub PR linking `Closes #104` (or partial wording if you split docs vs code).
+**Default “next PR”:** open **PR-A (#104)** from a fresh branch off `main`, run **CI parity** from **workflow.md**, then open the GitHub PR. Use **`Closes #104`** only when the PR fully satisfies the issue; otherwise **`Refs #104`** (or split into a second PR for remaining work).
 
 If you want **PR-B** or **PR-C** first instead, treat this document as **ordering guidance** only and update the issue links in the PR description accordingly.
