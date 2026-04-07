@@ -485,4 +485,3 @@ type AddConnectionOutput struct {
 	Active  string `json:"active" jsonschema:"name of the now-active connection"`
 	Message string `json:"message" jsonschema:"status message"`
 }
-

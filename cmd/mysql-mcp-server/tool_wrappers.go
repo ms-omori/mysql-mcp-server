@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/askdba/mysql-mcp-server/internal/config"
 	"context"
+	"github.com/askdba/mysql-mcp-server/internal/config"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -106,4 +106,3 @@ func wrapAddConnection(cm *ConnectionManager, cfg *config.Config) func(context.C
 		return toolAddConnection(ctx, req, input, cm, cfg)
 	}
 }
-

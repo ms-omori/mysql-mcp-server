@@ -2,11 +2,11 @@
 package main
 
 import (
-	"github.com/askdba/mysql-mcp-server/internal/config"
-	"github.com/go-sql-driver/mysql"
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/askdba/mysql-mcp-server/internal/config"
+	"github.com/go-sql-driver/mysql"
 	"regexp"
 	"strconv"
 	"strings"
@@ -916,4 +916,3 @@ func toolAddConnection(
 			Message: fmt.Sprintf("Added and switched to connection '%s'", name),
 		}, nil
 }
-

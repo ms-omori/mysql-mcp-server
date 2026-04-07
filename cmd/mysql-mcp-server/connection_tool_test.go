@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"testing"
 	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"testing"
 )
 
 func TestToolAddConnectionSecurity(t *testing.T) {
@@ -26,4 +26,3 @@ func TestToolAddConnectionSecurity(t *testing.T) {
 		t.Errorf("unexpected error message: %v, expected %v", err, expectedErr)
 	}
 }
-
