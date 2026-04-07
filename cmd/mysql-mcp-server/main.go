@@ -464,6 +464,11 @@ func registerExtendedTools(server *mcp.Server) {
 		Name:        "schema_diff",
 		Description: "Compare the schema between two databases",
 	}, toolSchemaDiffWrapped)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "add_connection",
+		Description: "Register and switch to a new MySQL connection at runtime.",
+	}, wrapTool("add_connection", wrapAddConnection(connManager, cfg)))
+
 }
 
 // ===== Config File Commands =====

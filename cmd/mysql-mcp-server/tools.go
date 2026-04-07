@@ -2,6 +2,8 @@
 package main
 
 import (
+	"github.com/askdba/mysql-mcp-server/internal/config"
+	"github.com/go-sql-driver/mysql"
 	"context"
 	"database/sql"
 	"fmt"
@@ -907,7 +909,7 @@ func toolAddConnection(
 		return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w", err)
 	}
 
-	return mcp.NewToolResultText(fmt.Sprintf("Successfully added and switched to connection '%s'.", name)),
+	return nil,
 		AddConnectionOutput{
 			Success: true,
 			Active:  name,
