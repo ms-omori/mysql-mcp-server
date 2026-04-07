@@ -473,3 +473,16 @@ type SchemaDiffOutput struct {
 	TargetDatabase string       `json:"target_database" jsonschema:"target database name"`
 	Diffs          []DiffResult `json:"diffs" jsonschema:"list of differences between schemas"`
 }
+
+type AddConnectionInput struct {
+	Name        string `json:"name" jsonschema:"unique name for the new connection"`
+	DSN         string `json:"dsn" jsonschema:"MySQL DSN (user:pass@tcp(host:port)/db)"`
+	Description string `json:"description,omitempty" jsonschema:"optional description of the connection"`
+}
+
+type AddConnectionOutput struct {
+	Success bool   `json:"success" jsonschema:"true if connection was added and activated"`
+	Active  string `json:"active" jsonschema:"name of the now-active connection"`
+	Message string `json:"message" jsonschema:"status message"`
+}
+
