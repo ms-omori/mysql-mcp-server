@@ -861,3 +861,57 @@ func maskResults(cols []string, rows [][]interface{}, patterns []string) {
 		}
 	}
 }
+
+func toolAddConnection(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+	input AddConnectionInput,
+	cm *ConnectionManager,
+	cfg *config.Config,
+) (*mcp.CallToolResult, AddConnectionOutput, error) {
+	name := strings.TrimSpace(input.Name)
+	dsn := strings.TrimSpace(input.DSN)
+	if name == "" || dsn == "" {
+		return nil, AddConnectionOutput{}, fmt.Errorf("name and dsn are required")
+	}
+
+	// 1. Check if name already exists
+	conns := cm.List()
+	for _, c := range conns {
+		if c.Name == name {
+			return nil, AddConnectionOutput{}, fmt.Errorf("connection '%s' already exists", name)
+		}
+	}
+
+	// 2. Safety Check: Reject root user
+	mysqlCfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("invalid DSN: %w", err)
+	}
+	if mysqlCfg.User == "root" {
+		return nil, AddConnectionOutput{}, fmt.Errorf("security policy: runtime registration of 'root' user is not allowed")
+	}
+
+	// 3. Add connection
+	connCfg := config.ConnectionConfig{
+		Name:        name,
+		DSN:         dsn,
+		Description: input.Description,
+	}
+	if err := cm.AddConnectionWithPoolConfig(connCfg, cfg); err != nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("failed to add connection: %w", err)
+	}
+
+	// 4. Automatically switch to it
+	if err := cm.SetActive(name); err != nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w", err)
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully added and switched to connection '%s'.", name)),
+		AddConnectionOutput{
+			Success: true,
+			Active:  name,
+			Message: fmt.Sprintf("Added and switched to connection '%s'", name),
+		}, nil
+}
+
