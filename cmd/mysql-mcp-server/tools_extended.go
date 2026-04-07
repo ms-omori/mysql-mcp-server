@@ -3,8 +3,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -164,7 +164,7 @@ func toolExplainQuery(
 	if format == "" {
 		format = "json"
 	}
-	
+
 	explainSQL := "EXPLAIN "
 	if format == "json" {
 		explainSQL = "EXPLAIN FORMAT=JSON "
@@ -239,7 +239,7 @@ func toolExplainQuery(
 	}
 
 	out := ExplainQueryOutput{Plan: result}
-	
+
 	if format == "traditional" {
 		if tabularPlan, ok := result.([]map[string]interface{}); ok {
 			out.Warnings = analyzeExplainPlan(tabularPlan)
@@ -1325,11 +1325,13 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 	}
 
 	plan := UnifiedExplainPlan{}
-	
+
 	if qb, ok := raw["query_block"].(map[string]interface{}); ok {
 		if ci, ok := qb["cost_info"].(map[string]interface{}); ok {
 			if costStr, ok := ci["query_cost"].(string); ok {
-				fmt.Sscanf(costStr, "%f", &plan.QueryCost)
+				if v, err := strconv.ParseFloat(costStr, 64); err == nil {
+					plan.QueryCost = v
+				}
 			}
 		}
 		if tables, ok := qb["table"].(map[string]interface{}); ok {
@@ -1350,39 +1352,75 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 			}
 		}
 	}
-	
+
 	return plan, nil
 }
 
 func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 	op := UnifiedOp{}
-	if name, ok := table["table_name"].(string); ok { op.TableName = name }
-	if access, ok := table["access_type"].(string); ok { op.AccessType = access }
-	if key, ok := table["key"].(string); ok { op.Key = key }
-	if keyLen, ok := table["key_length"].(string); ok { op.KeyLength = keyLen }
-	
-	if rows, ok := table["rows_examined_per_scan"].(float64); ok { op.RowsExamined = int64(rows) }
-	if rows, ok := table["rows"].(float64); ok { op.RowsExamined = int64(rows) }
-
-	if filteredStr, ok := table["filtered"].(string); ok {
-		fmt.Sscanf(filteredStr, "%f", &op.Filtered)
+	if name, ok := table["table_name"].(string); ok {
+		op.TableName = name
+	}
+	if access, ok := table["access_type"].(string); ok {
+		op.AccessType = access
+	}
+	if key, ok := table["key"].(string); ok {
+		op.Key = key
+	}
+	if keyLen, ok := table["key_length"].(string); ok {
+		op.KeyLength = keyLen
 	}
 
-	if msg, ok := table["message"].(string); ok { op.Message = msg }
-	if extra, ok := table["Extra"].(string); ok { op.Message = extra }
+	if rows, ok := table["rows_examined_per_scan"].(float64); ok {
+		op.RowsExamined = int64(rows)
+	}
+	if rows, ok := table["rows"].(float64); ok {
+		op.RowsExamined = int64(rows)
+	}
 
-	if cond, ok := table["attached_condition"].(string); ok { op.AttachedCondition = cond }
+	if filteredStr, ok := table["filtered"].(string); ok {
+		if v, err := strconv.ParseFloat(filteredStr, 64); err == nil {
+			op.Filtered = v
+		}
+	}
+
+	if msg, ok := table["message"].(string); ok {
+		op.Message = msg
+	}
+	if extra, ok := table["Extra"].(string); ok {
+		op.Message = extra
+	}
+
+	if cond, ok := table["attached_condition"].(string); ok {
+		op.AttachedCondition = cond
+	}
 
 	if ci, ok := table["cost_info"].(map[string]interface{}); ok {
-		if rcStr, ok := ci["read_cost"].(string); ok { fmt.Sscanf(rcStr, "%f", &op.CostInfo.ReadCost) }
-		if ecStr, ok := ci["eval_cost"].(string); ok { fmt.Sscanf(ecStr, "%f", &op.CostInfo.EvalCost) }
-		if pcStr, ok := ci["prefix_cost"].(string); ok { fmt.Sscanf(pcStr, "%f", &op.CostInfo.PrefixCost) }
-		if dStr, ok := ci["data_read_per_join"].(string); ok { op.CostInfo.DataReadPerJoin = dStr }
+		if rcStr, ok := ci["read_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(rcStr, 64); err == nil {
+				op.CostInfo.ReadCost = v
+			}
+		}
+		if ecStr, ok := ci["eval_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(ecStr, 64); err == nil {
+				op.CostInfo.EvalCost = v
+			}
+		}
+		if pcStr, ok := ci["prefix_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(pcStr, 64); err == nil {
+				op.CostInfo.PrefixCost = v
+			}
+		}
+		if dStr, ok := ci["data_read_per_join"].(string); ok {
+			op.CostInfo.DataReadPerJoin = dStr
+		}
 	}
 
 	if pkList, ok := table["possible_keys"].([]interface{}); ok {
 		for _, pk := range pkList {
-			if str, ok := pk.(string); ok { op.PossibleKeys = append(op.PossibleKeys, str) }
+			if str, ok := pk.(string); ok {
+				op.PossibleKeys = append(op.PossibleKeys, str)
+			}
 		}
 	}
 	return op

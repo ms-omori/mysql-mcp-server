@@ -274,12 +274,41 @@ type ShowCreateTableOutput struct {
 type ExplainQueryInput struct {
 	SQL      string `json:"sql" jsonschema:"SELECT query to explain"`
 	Database string `json:"database,omitempty" jsonschema:"optional database context"`
-	Format   string `json:"format,omitempty" jsonschema:"output format: traditional, json, tree (default: traditional)"`
+	Format   string `json:"format,omitempty" jsonschema:"output format: traditional, json, tree (default: json)"`
 }
 
 type ExplainQueryOutput struct {
-	Plan     []map[string]interface{} `json:"plan" jsonschema:"query execution plan"`
-	Warnings []string                 `json:"warnings,omitempty" jsonschema:"actionable optimization suggestions derived from the execution plan"`
+	Plan     interface{} `json:"plan" jsonschema:"query execution plan"`
+	Warnings []string    `json:"warnings,omitempty" jsonschema:"actionable optimization suggestions derived from the execution plan"`
+}
+
+// OpCostInfo holds per-operation cost details extracted from EXPLAIN FORMAT=JSON.
+type OpCostInfo struct {
+	ReadCost        float64 `json:"read_cost,omitempty"`
+	EvalCost        float64 `json:"eval_cost,omitempty"`
+	PrefixCost      float64 `json:"prefix_cost,omitempty"`
+	DataReadPerJoin string  `json:"data_read_per_join,omitempty"`
+}
+
+// UnifiedOp represents a single operation (table access) in a normalized EXPLAIN plan.
+type UnifiedOp struct {
+	TableName         string     `json:"table_name,omitempty"`
+	AccessType        string     `json:"access_type,omitempty"`
+	Key               string     `json:"key,omitempty"`
+	KeyLength         string     `json:"key_length,omitempty"`
+	RowsExamined      int64      `json:"rows_examined,omitempty"`
+	Filtered          float64    `json:"filtered,omitempty"`
+	Message           string     `json:"message,omitempty"`
+	AttachedCondition string     `json:"attached_condition,omitempty"`
+	PossibleKeys      []string   `json:"possible_keys,omitempty"`
+	CostInfo          OpCostInfo `json:"cost_info,omitempty"`
+}
+
+// UnifiedExplainPlan is a normalized representation of an EXPLAIN FORMAT=JSON result
+// that works across MySQL and MariaDB variants.
+type UnifiedExplainPlan struct {
+	QueryCost  float64     `json:"query_cost,omitempty"`
+	Operations []UnifiedOp `json:"operations,omitempty"`
 }
 
 type ListViewsInput struct {

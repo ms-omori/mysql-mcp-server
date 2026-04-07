@@ -194,8 +194,6 @@ func TestToolExplainQuerySuccess(t *testing.T) {
 	mock, cleanup := setupExtendedMockDB(t)
 	defer cleanup()
 
-	
-
 	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT \\* FROM users").WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"cost_info":{"query_cost":"10.0"}}}`))
 
 	ctx := context.Background()
