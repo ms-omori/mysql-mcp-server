@@ -30,19 +30,19 @@ type UnifiedExplainPlan struct {
 }
 
 type UnifiedOp struct {
-	TableName         string   `json:"table_name,omitempty" jsonschema:"Table being accessed"`
-	AccessType        string   `json:"access_type,omitempty" jsonschema:"Join type (e.g., ALL, ref, range, index)"`
-	PossibleKeys      []string `json:"possible_keys,omitempty" jsonschema:"Indexes that could be used"`
-	Key               string   `json:"key,omitempty" jsonschema:"The actual index used"`
-	KeyLength         string   `json:"key_length,omitempty" jsonschema:"Length of the chosen key"`
-	RowsExamined      int64    `json:"rows_examined,omitempty" jsonschema:"Estimated number of rows read"`
-	Filtered          float64  `json:"filtered_percent,omitempty" jsonschema:"Percentage of rows filtered by table condition"`
-	CostInfo          CostInfo `json:"cost_info,omitempty" jsonschema:"Detailed cost metrics"`
-	AttachedCondition string   `json:"attached_condition,omitempty" jsonschema:"WHERE or ON clauses applied during table access"`
-	Message           string   `json:"message,omitempty" jsonschema:"Additional execution details (e.g., Using temporary, Using filesort)"`
+	TableName         string     `json:"table_name,omitempty" jsonschema:"Table being accessed"`
+	AccessType        string     `json:"access_type,omitempty" jsonschema:"Join type (e.g., ALL, ref, range, index)"`
+	PossibleKeys      []string   `json:"possible_keys,omitempty" jsonschema:"Indexes that could be used"`
+	Key               string     `json:"key,omitempty" jsonschema:"The actual index used"`
+	KeyLength         string     `json:"key_length,omitempty" jsonschema:"Length of the chosen key"`
+	RowsExamined      int64      `json:"rows_examined,omitempty" jsonschema:"Estimated number of rows read"`
+	Filtered          float64    `json:"filtered,omitempty" jsonschema:"Percentage of rows filtered (matches EXPLAIN JSON key filtered)"`
+	CostInfo          OpCostInfo `json:"cost_info,omitempty" jsonschema:"Detailed cost metrics"`
+	AttachedCondition string     `json:"attached_condition,omitempty" jsonschema:"WHERE or ON clauses applied during table access"`
+	Message           string     `json:"message,omitempty" jsonschema:"Additional execution details (e.g., Using temporary, Using filesort)"`
 }
 
-type CostInfo struct {
+type OpCostInfo struct {
 	ReadCost        float64 `json:"read_cost,omitempty"`
 	EvalCost        float64 `json:"eval_cost,omitempty"`
 	PrefixCost      float64 `json:"prefix_cost,omitempty"`
@@ -72,73 +72,44 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 	}
 
 	plan := UnifiedExplainPlan{}
-	
-	// MySQL 8.x structure: {"query_block": { "cost_info": { "query_cost": "..." } ... }}
+
 	if qb, ok := raw["query_block"].(map[string]interface{}); ok {
+		costFromInfo := false
 		if ci, ok := qb["cost_info"].(map[string]interface{}); ok {
 			if costStr, ok := ci["query_cost"].(string); ok {
-				fmt.Sscanf(costStr, "%f", &plan.QueryCost)
+				if v, err := strconv.ParseFloat(costStr, 64); err == nil {
+					plan.QueryCost = v
+					costFromInfo = true
+				}
 			}
 		}
-		// Extract table ops
+		if !costFromInfo {
+			if v, ok := float64FromExplainJSONNumber(qb["cost"]); ok {
+				plan.QueryCost = v
+			}
+		}
 		if tables, ok := qb["table"].(map[string]interface{}); ok {
-			// Single table query
 			plan.Operations = append(plan.Operations, extractUnifiedOp(tables))
 		} else if tablesList, ok := qb["table"].([]interface{}); ok {
-			// Multiple tables (JOIN)
 			for _, t := range tablesList {
 				if tMap, ok := t.(map[string]interface{}); ok {
 					plan.Operations = append(plan.Operations, extractUnifiedOp(tMap))
 				}
 			}
 		} else if nestedOps, ok := qb["nested_loop"].([]interface{}); ok {
-			// Nested loops (JOIN)
 			for _, nl := range nestedOps {
 				if nlMap, ok := nl.(map[string]interface{}); ok {
-					if tMap, ok := nlMap["table"].(map[string]interface{}); ok {
+					if tMap, ok := tableMapFromNestedLoopStep(nlMap); ok {
 						plan.Operations = append(plan.Operations, extractUnifiedOp(tMap))
 					}
 				}
 			}
 		}
 	}
-	
+
 	return plan, nil
 }
-
-func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
-	op := UnifiedOp{}
-	if name, ok := table["table_name"].(string); ok { op.TableName = name }
-	if access, ok := table["access_type"].(string); ok { op.AccessType = access }
-	if key, ok := table["key"].(string); ok { op.Key = key }
-	if keyLen, ok := table["key_length"].(string); ok { op.KeyLength = keyLen }
-	
-	if rows, ok := table["rows_examined_per_scan"].(float64); ok { op.RowsExamined = int64(rows) } // JSON numbers are float64
-	if rows, ok := table["rows"].(float64); ok { op.RowsExamined = int64(rows) } // MySQL 8 format
-
-	if filteredStr, ok := table["filtered"].(string); ok {
-		fmt.Sscanf(filteredStr, "%f", &op.Filtered)
-	}
-
-	if msg, ok := table["message"].(string); ok { op.Message = msg }
-	if extra, ok := table["Extra"].(string); ok { op.Message = extra }
-
-	if cond, ok := table["attached_condition"].(string); ok { op.AttachedCondition = cond }
-
-	if ci, ok := table["cost_info"].(map[string]interface{}); ok {
-		if rcStr, ok := ci["read_cost"].(string); ok { fmt.Sscanf(rcStr, "%f", &op.CostInfo.ReadCost) }
-		if ecStr, ok := ci["eval_cost"].(string); ok { fmt.Sscanf(ecStr, "%f", &op.CostInfo.EvalCost) }
-		if pcStr, ok := ci["prefix_cost"].(string); ok { fmt.Sscanf(pcStr, "%f", &op.CostInfo.PrefixCost) }
-		if dStr, ok := ci["data_read_per_join"].(string); ok { op.CostInfo.DataReadPerJoin = dStr }
-	}
-
-	if pkList, ok := table["possible_keys"].([]interface{}); ok {
-		for _, pk := range pkList {
-			if str, ok := pk.(string); ok { op.PossibleKeys = append(op.PossibleKeys, str) }
-		}
-	}
-	return op
-}
+// extractUnifiedOp, float64FromExplainJSONNumber, tableMapFromNestedLoopStep: see tools_extended.go
 ```
 
 - [ ] **Step 2: Update toolExplainQuery logic**

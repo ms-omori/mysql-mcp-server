@@ -194,7 +194,9 @@ func TestToolExplainQuerySuccess(t *testing.T) {
 	mock, cleanup := setupExtendedMockDB(t)
 	defer cleanup()
 
-	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT \\* FROM users").WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"cost_info":{"query_cost":"10.0"}}}`))
+	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT \\* FROM users").WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(
+		`{"query_block":{"cost_info":{"query_cost":"10.0"},"table":{"table_name":"users","access_type":"ALL","rows":100,"filtered":100}}}`,
+	))
 
 	ctx := context.Background()
 	_, output, err := toolExplainQuery(ctx, &mcp.CallToolRequest{}, ExplainQueryInput{
@@ -212,9 +214,29 @@ func TestToolExplainQuerySuccess(t *testing.T) {
 	if plan.QueryCost != 10.0 {
 		t.Errorf("expected QueryCost 10.0, got %v", plan.QueryCost)
 	}
+	if len(plan.Operations) != 1 {
+		t.Fatalf("expected 1 operation, got %d", len(plan.Operations))
+	}
+	if plan.Operations[0].TableName != "users" || plan.Operations[0].AccessType != "ALL" {
+		t.Errorf("unexpected op0: %+v", plan.Operations[0])
+	}
+	if plan.Operations[0].RowsExamined != 100 || plan.Operations[0].Filtered != 100 {
+		t.Errorf("expected rows/filtered mapped, got RowsExamined=%d Filtered=%v", plan.Operations[0].RowsExamined, plan.Operations[0].Filtered)
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestMapRawExplainToUnifiedMariaDBQueryBlockCost(t *testing.T) {
+	raw := `{"query_block":{"select_id":1,"cost":42.5,"table":{"table_name":"t1","access_type":"ALL","rows":1}}}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if plan.QueryCost != 42.5 {
+		t.Errorf("expected QueryCost from query_block.cost, got %v", plan.QueryCost)
 	}
 }
 

@@ -1343,11 +1343,18 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 	plan := UnifiedExplainPlan{}
 
 	if qb, ok := raw["query_block"].(map[string]interface{}); ok {
+		costFromInfo := false
 		if ci, ok := qb["cost_info"].(map[string]interface{}); ok {
 			if costStr, ok := ci["query_cost"].(string); ok {
 				if v, err := strconv.ParseFloat(costStr, 64); err == nil {
 					plan.QueryCost = v
+					costFromInfo = true
 				}
+			}
+		}
+		if !costFromInfo {
+			if v, ok := float64FromExplainJSONNumber(qb["cost"]); ok {
+				plan.QueryCost = v
 			}
 		}
 		if tables, ok := qb["table"].(map[string]interface{}); ok {
@@ -1444,8 +1451,7 @@ func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 
 	if rows, ok := table["rows_examined_per_scan"].(float64); ok {
 		op.RowsExamined = int64(rows)
-	}
-	if rows, ok := table["rows"].(float64); ok {
+	} else if rows, ok := table["rows"].(float64); ok {
 		op.RowsExamined = int64(rows)
 	}
 
