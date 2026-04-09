@@ -274,12 +274,41 @@ type ShowCreateTableOutput struct {
 type ExplainQueryInput struct {
 	SQL      string `json:"sql" jsonschema:"SELECT query to explain"`
 	Database string `json:"database,omitempty" jsonschema:"optional database context"`
-	Format   string `json:"format,omitempty" jsonschema:"output format: traditional, json, tree (default: traditional)"`
+	Format   string `json:"format,omitempty" jsonschema:"output format: traditional, json, tree (default: json)"`
 }
 
 type ExplainQueryOutput struct {
-	Plan     []map[string]interface{} `json:"plan" jsonschema:"query execution plan"`
-	Warnings []string                 `json:"warnings,omitempty" jsonschema:"actionable optimization suggestions derived from the execution plan"`
+	Plan     interface{} `json:"plan" jsonschema:"query execution plan; shape depends on format: for format=json (default) this is typically UnifiedExplainPlan, or a raw JSON string if normalization fails; for format=traditional this is an array of row maps from EXPLAIN; for other formats (e.g. tree) this is an array of row maps from the server"`
+	Warnings []string    `json:"warnings,omitempty" jsonschema:"actionable optimization hints derived from a traditional tabular EXPLAIN; populated only when format=traditional, omitted otherwise"`
+}
+
+// OpCostInfo holds per-operation cost details extracted from EXPLAIN FORMAT=JSON.
+type OpCostInfo struct {
+	ReadCost        float64 `json:"read_cost,omitempty" jsonschema:"estimated cost to read data for this operation"`
+	EvalCost        float64 `json:"eval_cost,omitempty" jsonschema:"estimated cost to evaluate conditions for this operation"`
+	PrefixCost      float64 `json:"prefix_cost,omitempty" jsonschema:"cumulative estimated cost up to and including this operation"`
+	DataReadPerJoin string  `json:"data_read_per_join,omitempty" jsonschema:"estimated amount of data read per join for this operation"`
+}
+
+// UnifiedOp represents a single operation (table access) in a normalized EXPLAIN plan.
+type UnifiedOp struct {
+	TableName         string     `json:"table_name,omitempty" jsonschema:"table accessed by this operation"`
+	AccessType        string     `json:"access_type,omitempty" jsonschema:"join or access method (e.g. ALL, ref, range, index)"`
+	Key               string     `json:"key,omitempty" jsonschema:"index chosen for this operation"`
+	KeyLength         string     `json:"key_length,omitempty" jsonschema:"length of the index key used"`
+	RowsExamined      int64      `json:"rows_examined,omitempty" jsonschema:"estimated number of rows examined"`
+	Filtered          float64    `json:"filtered,omitempty" jsonschema:"estimated percentage of rows that pass the table filter (matches EXPLAIN JSON key filtered)"`
+	Message           string     `json:"message,omitempty" jsonschema:"additional optimizer or execution details for this operation"`
+	AttachedCondition string     `json:"attached_condition,omitempty" jsonschema:"condition attached to this operation"`
+	PossibleKeys      []string   `json:"possible_keys,omitempty" jsonschema:"indexes considered by the optimizer"`
+	CostInfo          OpCostInfo `json:"cost_info,omitempty" jsonschema:"per-operation cost details"`
+}
+
+// UnifiedExplainPlan is a normalized representation of an EXPLAIN FORMAT=JSON result
+// that works across MySQL and MariaDB variants.
+type UnifiedExplainPlan struct {
+	QueryCost  float64     `json:"query_cost,omitempty" jsonschema:"total estimated query cost"`
+	Operations []UnifiedOp `json:"operations,omitempty" jsonschema:"normalized list of operations in execution order"`
 }
 
 type ListViewsInput struct {

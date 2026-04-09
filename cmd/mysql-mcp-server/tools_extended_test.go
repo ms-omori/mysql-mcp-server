@@ -194,10 +194,9 @@ func TestToolExplainQuerySuccess(t *testing.T) {
 	mock, cleanup := setupExtendedMockDB(t)
 	defer cleanup()
 
-	rows := sqlmock.NewRows([]string{"id", "select_type", "table", "type", "possible_keys", "key", "key_len", "ref", "rows", "Extra"}).
-		AddRow(1, "SIMPLE", "users", "ALL", nil, nil, nil, nil, 100, "")
-
-	mock.ExpectQuery("EXPLAIN SELECT \\* FROM users").WillReturnRows(rows)
+	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT \\* FROM users").WillReturnRows(sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(
+		`{"query_block":{"cost_info":{"query_cost":"10.0"},"table":{"table_name":"users","access_type":"ALL","rows":100,"filtered":100}}}`,
+	))
 
 	ctx := context.Background()
 	_, output, err := toolExplainQuery(ctx, &mcp.CallToolRequest{}, ExplainQueryInput{
@@ -208,12 +207,136 @@ func TestToolExplainQuerySuccess(t *testing.T) {
 		t.Fatalf("toolExplainQuery failed: %v", err)
 	}
 
-	if len(output.Plan) == 0 {
-		t.Error("expected non-empty plan")
+	plan, ok := output.Plan.(UnifiedExplainPlan)
+	if !ok {
+		t.Fatal("expected output.Plan to be UnifiedExplainPlan")
+	}
+	if plan.QueryCost != 10.0 {
+		t.Errorf("expected QueryCost 10.0, got %v", plan.QueryCost)
+	}
+	if len(plan.Operations) != 1 {
+		t.Fatalf("expected 1 operation, got %d", len(plan.Operations))
+	}
+	if plan.Operations[0].TableName != "users" || plan.Operations[0].AccessType != "ALL" {
+		t.Errorf("unexpected op0: %+v", plan.Operations[0])
+	}
+	if plan.Operations[0].RowsExamined != 100 || plan.Operations[0].Filtered != 100 {
+		t.Errorf("expected rows/filtered mapped, got RowsExamined=%d Filtered=%v", plan.Operations[0].RowsExamined, plan.Operations[0].Filtered)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestMapRawExplainToUnifiedMariaDBQueryBlockCost(t *testing.T) {
+	raw := `{"query_block":{"select_id":1,"cost":42.5,"table":{"table_name":"t1","access_type":"ALL","rows":1}}}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if plan.QueryCost != 42.5 {
+		t.Errorf("expected QueryCost from query_block.cost, got %v", plan.QueryCost)
+	}
+}
+
+func TestMapRawExplainToUnifiedFilteredNumericString(t *testing.T) {
+	raw := `{"query_block":{"table":{"table_name":"t1","access_type":"ALL","filtered":"100"}}}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if len(plan.Operations) != 1 || plan.Operations[0].Filtered != 100 {
+		t.Fatalf("expected Filtered 100 from string, got %+v", plan.Operations)
+	}
+}
+
+func TestMapRawExplainToUnifiedFilteredInvalidType(t *testing.T) {
+	raw := `{"query_block":{"table":{"table_name":"t1","access_type":"ALL","filtered":true}}}`
+	_, err := mapRawExplainToUnified(raw)
+	if err == nil {
+		t.Fatal("expected error for invalid filtered type")
+	}
+}
+
+func TestToolExplainQueryFilteredInvalidReturnsError(t *testing.T) {
+	mock, cleanup := setupExtendedMockDB(t)
+	defer cleanup()
+
+	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT 1").WillReturnRows(
+		sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"table":{"table_name":"t1","filtered":"not-a-number"}}}`),
+	)
+
+	ctx := context.Background()
+	_, _, err := toolExplainQuery(ctx, &mcp.CallToolRequest{}, ExplainQueryInput{SQL: "SELECT 1"})
+	if err == nil {
+		t.Fatal("expected error from invalid filtered numeric string")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestMapRawExplainToUnifiedBlockNLJoinMergesAttachedCondition(t *testing.T) {
+	raw := `{
+  "query_block": {
+    "select_id": 1,
+    "nested_loop": [
+      {"table": {"table_name": "a", "access_type": "ALL", "rows": 1}},
+      {
+        "block-nl-join": {
+          "table": {"table_name": "b", "access_type": "ALL", "rows": 2},
+          "attached_condition": "b.x = a.y"
+        }
+      }
+    ]
+  }
+}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if len(plan.Operations) != 2 {
+		t.Fatalf("expected 2 operations, got %d", len(plan.Operations))
+	}
+	if plan.Operations[0].TableName != "a" {
+		t.Errorf("op0 table: %q", plan.Operations[0].TableName)
+	}
+	if plan.Operations[1].TableName != "b" {
+		t.Errorf("op1 table: %q", plan.Operations[1].TableName)
+	}
+	if plan.Operations[1].AttachedCondition != "b.x = a.y" {
+		t.Errorf("expected merged attached_condition on b, got %q", plan.Operations[1].AttachedCondition)
+	}
+}
+
+func TestMapRawExplainToUnifiedBlockNLJoinKeepsTableAttachedCondition(t *testing.T) {
+	raw := `{
+  "query_block": {
+    "nested_loop": [
+      {
+        "block-nl-join": {
+          "table": {
+            "table_name": "b",
+            "access_type": "ALL",
+            "attached_condition": "(b.id > 0)"
+          },
+          "attached_condition": "wrapper only"
+        }
+      }
+    ]
+  }
+}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if len(plan.Operations) != 1 {
+		t.Fatalf("expected 1 operation, got %d", len(plan.Operations))
+	}
+	if plan.Operations[0].AttachedCondition != "(b.id > 0)" {
+		t.Errorf("table attached_condition must win over wrapper: got %q", plan.Operations[0].AttachedCondition)
 	}
 }
 
@@ -1246,14 +1369,18 @@ func TestToolExplainQueryWarningsPopulated(t *testing.T) {
 
 	ctx := context.Background()
 	_, output, err := toolExplainQuery(ctx, &mcp.CallToolRequest{}, ExplainQueryInput{
-		SQL: "SELECT * FROM orders",
+		SQL: "SELECT * FROM orders", Format: "traditional",
 	})
 
 	if err != nil {
 		t.Fatalf("toolExplainQuery failed: %v", err)
 	}
-	if len(output.Plan) == 0 {
-		t.Error("expected non-empty plan")
+	plan, ok := output.Plan.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected output.Plan to be []map[string]interface{}, got %T", output.Plan)
+	}
+	if len(plan) == 0 {
+		t.Fatalf("expected non-empty plan")
 	}
 	if len(output.Warnings) == 0 {
 		t.Error("expected warnings for full table scan plan")

@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,6 +13,10 @@ import (
 	"github.com/askdba/mysql-mcp-server/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// errExplainFilteredValue marks normalization failures caused by an invalid
+// table.filtered value (see docs/superpowers/specs/2026-04-07-issue-104-richer-explain.md §7.6).
+var errExplainFilteredValue = errors.New("invalid filtered field in EXPLAIN JSON plan")
 
 // ===== Extended Tool Handlers (MYSQL_MCP_EXTENDED=1) =====
 
@@ -159,7 +165,18 @@ func toolExplainQuery(
 	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 
-	explainSQL := "EXPLAIN " + sqlText
+	format := strings.ToLower(strings.TrimSpace(input.Format))
+	if format == "" {
+		format = "json"
+	}
+
+	explainSQL := "EXPLAIN "
+	if format == "json" {
+		explainSQL = "EXPLAIN FORMAT=JSON "
+	} else if format == "tree" {
+		explainSQL = "EXPLAIN FORMAT=TREE "
+	}
+	explainSQL += sqlText
 	var rows *sql.Rows
 	var err error
 
@@ -190,26 +207,68 @@ func toolExplainQuery(
 	}
 	defer rows.Close()
 
-	cols, _ := rows.Columns()
-	out := ExplainQueryOutput{Plan: []map[string]interface{}{}}
+	var result interface{}
 
-	for rows.Next() {
-		values := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
+	if format == "json" {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON: %w", err)
+			}
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON returned no rows")
 		}
-		if err := rows.Scan(ptrs...); err != nil {
-			continue
+		var jsonPlan string
+		if err := rows.Scan(&jsonPlan); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("failed to scan json explain: %w", err)
 		}
-		row := make(map[string]interface{})
-		for i, col := range cols {
-			row[col] = util.NormalizeValue(values[i])
+		if rows.Next() {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON returned multiple rows")
 		}
-		out.Plan = append(out.Plan, row)
+		if err := rows.Err(); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON: %w", err)
+		}
+		unifiedPlan, parseErr := mapRawExplainToUnified(jsonPlan)
+		if parseErr != nil {
+			if errors.Is(parseErr, errExplainFilteredValue) {
+				return nil, ExplainQueryOutput{}, fmt.Errorf("failed to normalize EXPLAIN JSON: %w", parseErr)
+			}
+			result = jsonPlan
+		} else {
+			result = unifiedPlan
+		}
+	} else {
+		cols, err := rows.Columns()
+		if err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN columns: %w", err)
+		}
+		var traditionalPlan []map[string]interface{}
+		for rows.Next() {
+			values := make([]interface{}, len(cols))
+			ptrs := make([]interface{}, len(cols))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				return nil, ExplainQueryOutput{}, fmt.Errorf("failed to scan EXPLAIN row: %w", err)
+			}
+			row := make(map[string]interface{})
+			for i, col := range cols {
+				row[col] = util.NormalizeValue(values[i])
+			}
+			traditionalPlan = append(traditionalPlan, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN rows: %w", err)
+		}
+		result = traditionalPlan
 	}
 
-	out.Warnings = analyzeExplainPlan(out.Plan)
+	out := ExplainQueryOutput{Plan: result}
+
+	if format == "traditional" {
+		if tabularPlan, ok := result.([]map[string]interface{}); ok {
+			out.Warnings = analyzeExplainPlan(tabularPlan)
+		}
+	}
 
 	return nil, out, nil
 }
@@ -1281,4 +1340,210 @@ func isVectorSupported(version string) bool {
 		return false
 	}
 	return major >= 9
+}
+
+func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(rawJSON), &raw); err != nil {
+		return UnifiedExplainPlan{}, err
+	}
+
+	plan := UnifiedExplainPlan{}
+
+	if qb, ok := raw["query_block"].(map[string]interface{}); ok {
+		costFromInfo := false
+		if ci, ok := qb["cost_info"].(map[string]interface{}); ok {
+			if costStr, ok := ci["query_cost"].(string); ok {
+				if v, err := strconv.ParseFloat(costStr, 64); err == nil {
+					plan.QueryCost = v
+					costFromInfo = true
+				}
+			}
+		}
+		if !costFromInfo {
+			if v, ok := float64FromExplainJSONNumber(qb["cost"]); ok {
+				plan.QueryCost = v
+			}
+		}
+		if tables, ok := qb["table"].(map[string]interface{}); ok {
+			op, err := extractUnifiedOp(tables)
+			if err != nil {
+				return UnifiedExplainPlan{}, err
+			}
+			plan.Operations = append(plan.Operations, op)
+		} else if tablesList, ok := qb["table"].([]interface{}); ok {
+			for _, t := range tablesList {
+				if tMap, ok := t.(map[string]interface{}); ok {
+					op, err := extractUnifiedOp(tMap)
+					if err != nil {
+						return UnifiedExplainPlan{}, err
+					}
+					plan.Operations = append(plan.Operations, op)
+				}
+			}
+		} else if nestedOps, ok := qb["nested_loop"].([]interface{}); ok {
+			for _, nl := range nestedOps {
+				if nlMap, ok := nl.(map[string]interface{}); ok {
+					if tMap, ok := tableMapFromNestedLoopStep(nlMap); ok {
+						op, err := extractUnifiedOp(tMap)
+						if err != nil {
+							return UnifiedExplainPlan{}, err
+						}
+						plan.Operations = append(plan.Operations, op)
+					}
+				}
+			}
+		}
+	}
+
+	return plan, nil
+}
+
+// tableMapFromNestedLoopStep extracts a per-step table map from a nested_loop element.
+// It handles a direct "table" object and MariaDB's "block-nl-join" wrapper. For block-nl-join,
+// the wrapper's attached_condition MUST be merged into a copy of block-nl-join.table when
+// that table object has no attached_condition (see spec: deterministic merge rule).
+func tableMapFromNestedLoopStep(nlMap map[string]interface{}) (map[string]interface{}, bool) {
+	if tMap, ok := nlMap["table"].(map[string]interface{}); ok {
+		return tMap, true
+	}
+	bnl, ok := nlMap["block-nl-join"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	tMap, ok := bnl["table"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	if _, has := tMap["attached_condition"]; has {
+		return tMap, true
+	}
+	wrapCond, ok := bnl["attached_condition"].(string)
+	if !ok || wrapCond == "" {
+		return tMap, true
+	}
+	merged := make(map[string]interface{}, len(tMap)+1)
+	for k, v := range tMap {
+		merged[k] = v
+	}
+	merged["attached_condition"] = wrapCond
+	return merged, true
+}
+
+// float64FromExplainJSONNumber coerces EXPLAIN FORMAT=JSON numeric fields from
+// map[string]interface{} (float64 from encoding/json, json.Number with UseNumber, or integer types).
+func float64FromExplainJSONNumber(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// parseExplainFilteredField implements §7.6 rule 4 (filtered) for EXPLAIN JSON table maps.
+func parseExplainFilteredField(v interface{}) (float64, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if f, ok := float64FromExplainJSONNumber(v); ok {
+		return f, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return 0, fmt.Errorf("%w: unsupported type %T (allowed: JSON numbers and numeric strings)", errExplainFilteredValue, v)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("%w: filtered is empty string", errExplainFilteredValue)
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: cannot parse %q as numeric string: %v", errExplainFilteredValue, s, err)
+	}
+	return f, nil
+}
+
+func extractUnifiedOp(table map[string]interface{}) (UnifiedOp, error) {
+	op := UnifiedOp{}
+	if name, ok := table["table_name"].(string); ok {
+		op.TableName = name
+	}
+	if access, ok := table["access_type"].(string); ok {
+		op.AccessType = access
+	}
+	if key, ok := table["key"].(string); ok {
+		op.Key = key
+	}
+	if keyLen, ok := table["key_length"].(string); ok {
+		op.KeyLength = keyLen
+	}
+
+	if rows, ok := table["rows_examined_per_scan"].(float64); ok {
+		op.RowsExamined = int64(rows)
+	} else if rows, ok := table["rows"].(float64); ok {
+		op.RowsExamined = int64(rows)
+	}
+
+	if v, ok := table["filtered"]; ok {
+		f, err := parseExplainFilteredField(v)
+		if err != nil {
+			return UnifiedOp{}, err
+		}
+		op.Filtered = f
+	}
+
+	if msg, ok := table["message"].(string); ok {
+		op.Message = msg
+	}
+	if extra, ok := table["Extra"].(string); ok {
+		op.Message = extra
+	}
+
+	if cond, ok := table["attached_condition"].(string); ok {
+		op.AttachedCondition = cond
+	}
+
+	if ci, ok := table["cost_info"].(map[string]interface{}); ok {
+		if rcStr, ok := ci["read_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(rcStr, 64); err == nil {
+				op.CostInfo.ReadCost = v
+			}
+		}
+		if ecStr, ok := ci["eval_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(ecStr, 64); err == nil {
+				op.CostInfo.EvalCost = v
+			}
+		}
+		if pcStr, ok := ci["prefix_cost"].(string); ok {
+			if v, err := strconv.ParseFloat(pcStr, 64); err == nil {
+				op.CostInfo.PrefixCost = v
+			}
+		}
+		if dStr, ok := ci["data_read_per_join"].(string); ok {
+			op.CostInfo.DataReadPerJoin = dStr
+		}
+	}
+
+	if pkList, ok := table["possible_keys"].([]interface{}); ok {
+		for _, pk := range pkList {
+			if str, ok := pk.(string); ok {
+				op.PossibleKeys = append(op.PossibleKeys, str)
+			}
+		}
+	}
+	return op, nil
 }
