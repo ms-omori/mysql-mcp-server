@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,10 @@ import (
 	"github.com/askdba/mysql-mcp-server/internal/util"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// errExplainFilteredValue marks normalization failures caused by an invalid
+// table.filtered value (see docs/superpowers/specs/2026-04-07-issue-104-richer-explain.md §7.6).
+var errExplainFilteredValue = errors.New("invalid filtered field in EXPLAIN JSON plan")
 
 // ===== Extended Tool Handlers (MYSQL_MCP_EXTENDED=1) =====
 
@@ -223,6 +228,9 @@ func toolExplainQuery(
 		}
 		unifiedPlan, parseErr := mapRawExplainToUnified(jsonPlan)
 		if parseErr != nil {
+			if errors.Is(parseErr, errExplainFilteredValue) {
+				return nil, ExplainQueryOutput{}, fmt.Errorf("failed to normalize EXPLAIN JSON: %w", parseErr)
+			}
 			result = jsonPlan
 		} else {
 			result = unifiedPlan
@@ -1358,18 +1366,30 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 			}
 		}
 		if tables, ok := qb["table"].(map[string]interface{}); ok {
-			plan.Operations = append(plan.Operations, extractUnifiedOp(tables))
+			op, err := extractUnifiedOp(tables)
+			if err != nil {
+				return UnifiedExplainPlan{}, err
+			}
+			plan.Operations = append(plan.Operations, op)
 		} else if tablesList, ok := qb["table"].([]interface{}); ok {
 			for _, t := range tablesList {
 				if tMap, ok := t.(map[string]interface{}); ok {
-					plan.Operations = append(plan.Operations, extractUnifiedOp(tMap))
+					op, err := extractUnifiedOp(tMap)
+					if err != nil {
+						return UnifiedExplainPlan{}, err
+					}
+					plan.Operations = append(plan.Operations, op)
 				}
 			}
 		} else if nestedOps, ok := qb["nested_loop"].([]interface{}); ok {
 			for _, nl := range nestedOps {
 				if nlMap, ok := nl.(map[string]interface{}); ok {
 					if tMap, ok := tableMapFromNestedLoopStep(nlMap); ok {
-						plan.Operations = append(plan.Operations, extractUnifiedOp(tMap))
+						op, err := extractUnifiedOp(tMap)
+						if err != nil {
+							return UnifiedExplainPlan{}, err
+						}
+						plan.Operations = append(plan.Operations, op)
 					}
 				}
 			}
@@ -1434,7 +1454,30 @@ func float64FromExplainJSONNumber(v interface{}) (float64, bool) {
 	}
 }
 
-func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
+// parseExplainFilteredField implements §7.6 rule 4 (filtered) for EXPLAIN JSON table maps.
+func parseExplainFilteredField(v interface{}) (float64, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if f, ok := float64FromExplainJSONNumber(v); ok {
+		return f, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return 0, fmt.Errorf("%w: unsupported type %T (allowed: JSON numbers and numeric strings)", errExplainFilteredValue, v)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("%w: filtered is empty string", errExplainFilteredValue)
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: cannot parse %q as numeric string: %v", errExplainFilteredValue, s, err)
+	}
+	return f, nil
+}
+
+func extractUnifiedOp(table map[string]interface{}) (UnifiedOp, error) {
 	op := UnifiedOp{}
 	if name, ok := table["table_name"].(string); ok {
 		op.TableName = name
@@ -1456,9 +1499,11 @@ func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 	}
 
 	if v, ok := table["filtered"]; ok {
-		if f, ok := float64FromExplainJSONNumber(v); ok {
-			op.Filtered = f
+		f, err := parseExplainFilteredField(v)
+		if err != nil {
+			return UnifiedOp{}, err
 		}
+		op.Filtered = f
 	}
 
 	if msg, ok := table["message"].(string); ok {
@@ -1500,5 +1545,5 @@ func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 			}
 		}
 	}
-	return op
+	return op, nil
 }

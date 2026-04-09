@@ -240,6 +240,44 @@ func TestMapRawExplainToUnifiedMariaDBQueryBlockCost(t *testing.T) {
 	}
 }
 
+func TestMapRawExplainToUnifiedFilteredNumericString(t *testing.T) {
+	raw := `{"query_block":{"table":{"table_name":"t1","access_type":"ALL","filtered":"100"}}}`
+	plan, err := mapRawExplainToUnified(raw)
+	if err != nil {
+		t.Fatalf("mapRawExplainToUnified: %v", err)
+	}
+	if len(plan.Operations) != 1 || plan.Operations[0].Filtered != 100 {
+		t.Fatalf("expected Filtered 100 from string, got %+v", plan.Operations)
+	}
+}
+
+func TestMapRawExplainToUnifiedFilteredInvalidType(t *testing.T) {
+	raw := `{"query_block":{"table":{"table_name":"t1","access_type":"ALL","filtered":true}}}`
+	_, err := mapRawExplainToUnified(raw)
+	if err == nil {
+		t.Fatal("expected error for invalid filtered type")
+	}
+}
+
+func TestToolExplainQueryFilteredInvalidReturnsError(t *testing.T) {
+	mock, cleanup := setupExtendedMockDB(t)
+	defer cleanup()
+
+	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT 1").WillReturnRows(
+		sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(`{"query_block":{"table":{"table_name":"t1","filtered":"not-a-number"}}}`),
+	)
+
+	ctx := context.Background()
+	_, _, err := toolExplainQuery(ctx, &mcp.CallToolRequest{}, ExplainQueryInput{SQL: "SELECT 1"})
+	if err == nil {
+		t.Fatal("expected error from invalid filtered numeric string")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
 func TestMapRawExplainToUnifiedBlockNLJoinMergesAttachedCondition(t *testing.T) {
 	raw := `{
   "query_block": {

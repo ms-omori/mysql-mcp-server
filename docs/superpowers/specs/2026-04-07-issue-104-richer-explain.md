@@ -95,8 +95,9 @@ This section matches **`toolExplainQuery`** and **`mapRawExplainToUnified`** in 
 - **EXPLAIN fails** (syntax, permission, connection, empty result set for JSON, etc.): the handler returns a **non-nil Go `error`** and does **not** return a successful structured result. **`ExplainQueryOutput`** is the zero value on those paths. SQL/driver details are wrapped in the error (callers inspect **`err`**; MySQL error codes propagate via the driver).
 - **`EXPLAIN FORMAT=JSON` succeeds** and returns a JSON string: the server unmarshals it once. **`mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error)`**:
   - If **JSON unmarshaling** of the plan string fails → returns **`error`**; **`toolExplainQuery`** then sets **`Plan`** to the **raw string** so the client still receives the payload.
-  - If unmarshaling succeeds, mapping always produces a **`UnifiedExplainPlan`** (possibly empty **`Operations`** if the document lacks expected keys). There is **no** separate **`PartialOpErrors`** slice or per-op error list in the current signature.
-- **Callers should check the Go `error` return before using `Plan`.** When **`err == nil`** and **`format=json`**, use a **type switch** on **`Plan`**: **`UnifiedExplainPlan`** vs **`string`** (raw fallback).
+  - If unmarshaling succeeds but **normalization fails** because a **`filtered`** field violates §7.6 rule 4 → **`toolExplainQuery`** returns a **non-nil error** (descriptive message); no **`Plan`** payload on success path.
+  - If unmarshaling succeeds and mapping completes, produces a **`UnifiedExplainPlan`** (possibly empty **`Operations`** if the document lacks expected keys). There is **no** separate **`PartialOpErrors`** slice or per-op error list in the current signature.
+- **Callers should check the Go `error` return before using `Plan`.** When **`err == nil`** and **`format=json`**, use a **type switch** on **`Plan`**: **`UnifiedExplainPlan`** vs **`string`** (raw fallback only when the top-level JSON document could not be unmarshaled).
 
 ## 6. Implementation Details
 * **cmd/mysql-mcp-server/types.go**: Defines **`UnifiedExplainPlan`**, **`UnifiedOp`**, **`OpCostInfo`**, **`ExplainQueryOutput`**.
@@ -105,7 +106,7 @@ This section matches **`toolExplainQuery`** and **`mapRawExplainToUnified`** in 
   * **`EXPLAIN FORMAT=JSON`** for the JSON path; errors on no rows / scan / **`rows.Err()`**.
   * Parse the JSON string (single row/column from the server).
   * **`mapRawExplainToUnified`** maps engine JSON under **`query_block`** into **`UnifiedExplainPlan`** (see §7).
-  * Return **`ExplainQueryOutput`** with **`Plan`** set to **`UnifiedExplainPlan`** or raw JSON string on normalization failure.
+  * Return **`ExplainQueryOutput`** with **`Plan`** set to **`UnifiedExplainPlan`**, or raw JSON string only when the plan string is not valid top-level JSON; invalid per-field values such as **`filtered`** (§7.6) surface as **`error`** from **`toolExplainQuery`**.
 
 ## 7. MySQL vs MariaDB JSON: nesting shapes and mapping
 
@@ -204,7 +205,7 @@ MySQL and MariaDB both expose a top-level **`query_block`**, but they differ in 
 | **`UnifiedOp.TableName`** | **`table.table_name`** | **`table.table_name`** |
 | **`UnifiedOp.AccessType`** | **`table.access_type`** | **`table.access_type`** |
 | **`UnifiedOp.RowsExamined`** | **`table.rows_examined_per_scan`** or **`table.rows`** | **`table.rows`** or **`table.rows_examined_per_scan`** (whichever present) |
-| **`UnifiedOp.Filtered`** | **`table.filtered`** (JSON number) | **`table.filtered`** (JSON number) |
+| **`UnifiedOp.Filtered`** | **`table.filtered`** (see §7.6 rule 4) | Same |
 | **`UnifiedOp.Key`**, **`KeyLength`**, **`PossibleKeys`** | **`table.key`**, **`table.key_length`**, **`table.possible_keys`** | Same keys on **`table`** |
 | **`UnifiedOp.AttachedCondition`** | **`table.attached_condition`** | **`table.attached_condition`**, with **wrapper merge** for **`block-nl-join`** (§7.5) |
 | **`UnifiedOp.Message`** | **`table.message`** and/or **`table.Extra`** | **`table.message`** / **`Extra`** when present |
@@ -224,7 +225,11 @@ If a nested-loop element exposes **`table`** directly (not **`block-nl-join`**),
 1. **Query-level cost:** Use **`query_block.cost_info.query_cost`** when present; else **`query_block.cost`** (MariaDB); else leave **`QueryCost` unset** (zero / omit in JSON).
 2. **Operations list:** Prefer **`query_block.table`** (scalar or array); else walk **`query_block.nested_loop`** in order. For each element: if **`table`** exists, **`extractUnifiedOp(table)`**; if **`block-nl-join`** exists, build the table map per §7.5 then **`extractUnifiedOp`**.
 3. **Per-op rows:** Prefer **`rows_examined_per_scan`**, then **`rows`**.
-4. **Per-op filtered:** Accept JSON numbers (and coercions per implementation); if missing, leave **`Filtered`** zero.
+4. **Per-op filtered (`UnifiedOp.Filtered`):** The value at **`table["filtered"]`** (when the key is present) MUST be interpreted as follows:
+   - **Allowed values:** JSON numbers (e.g. `100`, `100.0` as **`float64`** after `encoding/json` unmarshaling into **`map[string]interface{}`**), integer-like JSON numbers coerced via the same numeric path as other EXPLAIN fields, **`json.Number`** (when **`Decoder.UseNumber()`** is used), and **numeric strings** whose content is a valid JSON number literal after trim (e.g. **`"100"`** → **100.0**, **`"99.5"`** → **99.5**) using the same rules as **`strconv.ParseFloat`** on that string (standard JSON number parse).
+   - **Rejected:** Any other dynamic type (e.g. **`bool`**, **`[]interface{}`**, arbitrary non-numeric strings such as **`"high"`**). Implementations MUST NOT silently ignore a present but invalid **`filtered`** value.
+   - **Absent or null:** If **`filtered`** is **missing** or the value is JSON **`null`**, **`Filtered`** remains **0** (zero).
+   - **Failure semantics:** If **`filtered`** is present and not **`null`**, and the value is not in the allowed set above, or a numeric string fails to parse, the implementation MUST treat this as a **protocol / normalization error**: fail the **`explain_query`** request and return a **descriptive error** to the caller (do not return a partially normalized plan and do not substitute zero without error). This matches rejecting invalid EXPLAIN JSON for the **`filtered`** field specifically.
 5. **Fields present on one engine only:** Map when the path exists; otherwise omit / zero. Do not invent values; optional analyzer-specific fields (e.g. MariaDB-only **`using_index`**) may be ignored unless later added to **`UnifiedOp`**.
 
 ## 8. Backwards Compatibility
