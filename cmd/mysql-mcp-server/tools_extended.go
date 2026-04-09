@@ -1361,7 +1361,7 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 		} else if nestedOps, ok := qb["nested_loop"].([]interface{}); ok {
 			for _, nl := range nestedOps {
 				if nlMap, ok := nl.(map[string]interface{}); ok {
-					if tMap, ok := nlMap["table"].(map[string]interface{}); ok {
+					if tMap, ok := tableMapFromNestedLoopStep(nlMap); ok {
 						plan.Operations = append(plan.Operations, extractUnifiedOp(tMap))
 					}
 				}
@@ -1370,6 +1370,37 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 	}
 
 	return plan, nil
+}
+
+// tableMapFromNestedLoopStep extracts a per-step table map from a nested_loop element.
+// It handles a direct "table" object and MariaDB's "block-nl-join" wrapper. For block-nl-join,
+// the wrapper's attached_condition MUST be merged into a copy of block-nl-join.table when
+// that table object has no attached_condition (see spec: deterministic merge rule).
+func tableMapFromNestedLoopStep(nlMap map[string]interface{}) (map[string]interface{}, bool) {
+	if tMap, ok := nlMap["table"].(map[string]interface{}); ok {
+		return tMap, true
+	}
+	bnl, ok := nlMap["block-nl-join"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	tMap, ok := bnl["table"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	if _, has := tMap["attached_condition"]; has {
+		return tMap, true
+	}
+	wrapCond, ok := bnl["attached_condition"].(string)
+	if !ok || wrapCond == "" {
+		return tMap, true
+	}
+	merged := make(map[string]interface{}, len(tMap)+1)
+	for k, v := range tMap {
+		merged[k] = v
+	}
+	merged["attached_condition"] = wrapCond
+	return merged, true
 }
 
 // float64FromExplainJSONNumber coerces EXPLAIN FORMAT=JSON numeric fields from
