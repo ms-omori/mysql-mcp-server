@@ -581,7 +581,7 @@ func TestHTTPExplainQuerySuccess(t *testing.T) {
 	mock, cleanup := setupHTTPTest(t)
 	defer cleanup()
 
-	jsonPlan := `{"query_block":{"select_id":1,"cost_info":{"query_cost":"10.00"},"table":{"table_name":"users","access_type":"ALL","rows_examined_per_scan":100,"filtered":"100.00"}}}`
+	jsonPlan := `{"query_block":{"select_id":1,"cost_info":{"query_cost":"10.00"},"table":{"table_name":"users","access_type":"ALL","rows_examined_per_scan":100,"filtered":100}}`
 	rows := sqlmock.NewRows([]string{"EXPLAIN"}).AddRow(jsonPlan)
 	mock.ExpectQuery("EXPLAIN FORMAT=JSON SELECT \\* FROM users").WillReturnRows(rows)
 

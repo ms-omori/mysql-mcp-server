@@ -205,20 +205,33 @@ func toolExplainQuery(
 	var result interface{}
 
 	if format == "json" {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON: %w", err)
+			}
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON returned no rows")
+		}
+		var jsonPlan string
+		if err := rows.Scan(&jsonPlan); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("failed to scan json explain: %w", err)
+		}
 		if rows.Next() {
-			var jsonPlan string
-			if err := rows.Scan(&jsonPlan); err != nil {
-				return nil, ExplainQueryOutput{}, fmt.Errorf("failed to scan json explain: %w", err)
-			}
-			unifiedPlan, parseErr := mapRawExplainToUnified(jsonPlan)
-			if parseErr != nil {
-				result = jsonPlan
-			} else {
-				result = unifiedPlan
-			}
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON returned multiple rows")
+		}
+		if err := rows.Err(); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN FORMAT=JSON: %w", err)
+		}
+		unifiedPlan, parseErr := mapRawExplainToUnified(jsonPlan)
+		if parseErr != nil {
+			result = jsonPlan
+		} else {
+			result = unifiedPlan
 		}
 	} else {
-		cols, _ := rows.Columns()
+		cols, err := rows.Columns()
+		if err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN columns: %w", err)
+		}
 		var traditionalPlan []map[string]interface{}
 		for rows.Next() {
 			values := make([]interface{}, len(cols))
@@ -227,13 +240,16 @@ func toolExplainQuery(
 				ptrs[i] = &values[i]
 			}
 			if err := rows.Scan(ptrs...); err != nil {
-				continue
+				return nil, ExplainQueryOutput{}, fmt.Errorf("failed to scan EXPLAIN row: %w", err)
 			}
 			row := make(map[string]interface{})
 			for i, col := range cols {
 				row[col] = util.NormalizeValue(values[i])
 			}
 			traditionalPlan = append(traditionalPlan, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, ExplainQueryOutput{}, fmt.Errorf("EXPLAIN rows: %w", err)
 		}
 		result = traditionalPlan
 	}
@@ -1356,6 +1372,30 @@ func mapRawExplainToUnified(rawJSON string) (UnifiedExplainPlan, error) {
 	return plan, nil
 }
 
+// float64FromExplainJSONNumber coerces EXPLAIN FORMAT=JSON numeric fields from
+// map[string]interface{} (float64 from encoding/json, json.Number with UseNumber, or integer types).
+func float64FromExplainJSONNumber(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 	op := UnifiedOp{}
 	if name, ok := table["table_name"].(string); ok {
@@ -1378,9 +1418,9 @@ func extractUnifiedOp(table map[string]interface{}) UnifiedOp {
 		op.RowsExamined = int64(rows)
 	}
 
-	if filteredStr, ok := table["filtered"].(string); ok {
-		if v, err := strconv.ParseFloat(filteredStr, 64); err == nil {
-			op.Filtered = v
+	if v, ok := table["filtered"]; ok {
+		if f, ok := float64FromExplainJSONNumber(v); ok {
+			op.Filtered = f
 		}
 	}
 
