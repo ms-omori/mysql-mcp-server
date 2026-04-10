@@ -900,8 +900,11 @@ func toolAddConnection(
 		return nil, AddConnectionOutput{}, fmt.Errorf("failed to add connection: %w", err)
 	}
 
-	// 3. Automatically switch to it
+	// 3. Automatically switch to it (process-wide active DSN; see spec)
 	if err := cm.SetActive(name); err != nil {
+		if rbErr := cm.RemoveConnection(name); rbErr != nil {
+			return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w (rollback of added connection also failed: %v)", err, rbErr)
+		}
 		return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w", err)
 	}
 

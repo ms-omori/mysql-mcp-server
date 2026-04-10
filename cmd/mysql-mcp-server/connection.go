@@ -256,6 +256,31 @@ func (cm *ConnectionManager) SetActive(name string) error {
 	return nil
 }
 
+// RemoveConnection tears down a named connection: closes the pool, removes config and
+// server type metadata, closes any SSH tunnel, and clears activeConn if it pointed at name.
+// Used for rollback (e.g. after add_connection fails activation).
+func (cm *ConnectionManager) RemoveConnection(name string) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	db, ok := cm.connections[name]
+	if !ok {
+		return fmt.Errorf("connection '%s' not found", name)
+	}
+	db.Close()
+	delete(cm.connections, name)
+	delete(cm.configs, name)
+	delete(cm.serverTypes, name)
+	if closeTunnel := cm.tunnelClosers[name]; closeTunnel != nil {
+		closeTunnel()
+		delete(cm.tunnelClosers, name)
+	}
+	if cm.activeConn == name {
+		cm.activeConn = ""
+	}
+	return nil
+}
+
 // List returns a list of all connection configurations with masked DSNs.
 func (cm *ConnectionManager) List() []config.ConnectionConfig {
 	cm.mu.RLock()

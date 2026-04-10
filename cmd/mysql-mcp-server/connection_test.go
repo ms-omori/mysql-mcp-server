@@ -79,6 +79,32 @@ func TestApplyDefaultIOTimeoutsPreservesExplicit(t *testing.T) {
 	}
 }
 
+func TestConnectionManagerRemoveConnection(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	cm.connections["dropme"] = mockDB
+	cm.configs["dropme"] = config.ConnectionConfig{Name: "dropme", DSN: "user:pass@tcp(127.0.0.1:3306)/db"}
+	cm.activeConn = "dropme"
+	cm.mu.Unlock()
+
+	if err := cm.RemoveConnection("dropme"); err != nil {
+		t.Fatalf("RemoveConnection: %v", err)
+	}
+	db, name := cm.GetActive()
+	if db != nil || name != "" {
+		t.Fatalf("expected no active connection after remove, got db=%v name=%q", db != nil, name)
+	}
+	if len(cm.List()) != 0 {
+		t.Fatal("expected List empty after remove")
+	}
+}
+
 func TestAddConnectionIfAbsentAlreadyExists(t *testing.T) {
 	mockDB, _, err := sqlmock.New()
 	if err != nil {
