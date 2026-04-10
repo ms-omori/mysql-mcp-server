@@ -123,7 +123,7 @@ Environment variables:
 | MYSQL_QUERY_TIMEOUT | No | – | Query timeout in **milliseconds** (e.g. `30000`); used only if `MYSQL_QUERY_TIMEOUT_SECONDS` is unset |
 | MYSQL_POOL_SIZE | No | – | Alias for `MYSQL_MAX_OPEN_CONNS` (pool size); `MYSQL_MAX_OPEN_CONNS` overrides when both are set |
 | MYSQL_MCP_EXTENDED | No | 0 | Enable extended tools (set to 1) |
-| MYSQL_MCP_ENABLE_ADD_CONNECTION | No | 0 | Set `1` to register **`add_connection`** (runtime DSN registration). Requires **`MYSQL_MCP_EXTENDED=1`**. |
+| MYSQL_MCP_ENABLE_ADD_CONNECTION | No | 0 | Set `1` to expose the MCP tool **`add_connection`** (runtime DSN registration; see [add_connection](#add_connection)). Requires **`MYSQL_MCP_EXTENDED=1`**. Not available over the HTTP REST API. |
 | MYSQL_MCP_JSON_LOGS | No | 0 | Enable JSON structured logging (set to 1) |
 | MYSQL_MCP_TOKEN_TRACKING | No | 0 | Enable estimated token usage tracking (set to 1) |
 | MYSQL_MCP_TOKEN_MODEL | No | cl100k_base | Tokenizer encoding to use for estimation |
@@ -254,6 +254,8 @@ export MYSQL_CONNECTIONS='[
   {"name": "staging", "dsn": "user:pass@tcp(staging:3306)/db?parseTime=true", "description": "Staging"}
 ]'
 ```
+
+**Runtime vs static DSNs:** Connections defined here (env vars, `MYSQL_CONNECTIONS`, or YAML) are loaded at process startup into the shared `ConnectionManager`. The optional MCP tool **`add_connection`** (requires **`MYSQL_MCP_EXTENDED=1`** and **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**) can register **additional** named DSNs later without restart. New names must not collide with existing connection names. Runtime-registered pools use the same global “active” connection as config-loaded ones—see [add_connection](#add_connection). There is no separate per-client session; all MCP clients using the same server process share one active DSN unless you run multiple server instances.
 
 ### Configuration File
 
@@ -618,6 +620,47 @@ Output:
 }
 ```
 
+### add_connection
+
+**MCP only.** Registers a new named MySQL connection at runtime and switches the **process-wide** active connection to it. There is **no** `curl`/REST equivalent; HTTP clients continue to use [`GET /api/connections`](#api-endpoints) and [`POST /api/connections/use`](#api-endpoints) only for connections already present in the server.
+
+Enable:
+
+```bash
+export MYSQL_MCP_EXTENDED=1
+export MYSQL_MCP_ENABLE_ADD_CONNECTION=1
+```
+
+Input:
+
+```json
+{
+  "name": "analytics",
+  "dsn": "appuser:secret@tcp(db.example.com:3306)/warehouse?parseTime=true",
+  "description": "Optional label"
+}
+```
+
+| Field | Required | Rules |
+|-------|----------|--------|
+| `name` | Yes | Non-empty; must not match an existing connection name (atomic check in `ConnectionManager`). |
+| `dsn` | Yes | Non-empty; must parse as a valid MySQL DSN. **`root`** as the MySQL user is **rejected** at registration time. |
+| `description` | No | Stored with the connection metadata. |
+
+Behavior: builds a `ConnectionConfig`, opens a pool, **`Ping()`** with the tool request context (timeouts/cancellation), then **`SetActive(name)`**. On activation failure after a successful add, the server removes the new pool (**rollback**). The active connection applies to **all** tools and clients on this process until switched again (`use_connection` or another `add_connection`).
+
+Output (success):
+
+```json
+{
+  "success": true,
+  "active": "analytics",
+  "message": "Added and switched to connection 'analytics'"
+}
+```
+
+Typical errors (tool returns an error result): duplicate name, invalid DSN, `root` user blocked, unreachable host (ping failure), activation/rollback failure. See [Runtime connection registration (add_connection)](#runtime-connection-registration-add_connection) for security implications.
+
 ## Vector Tools (MySQL 9.0+)
 
 Enable with:
@@ -687,6 +730,8 @@ Enable with:
 ```bash
 export MYSQL_MCP_EXTENDED=1
 ```
+
+Runtime registration of additional DSNs (MCP tool **`add_connection`**) also requires **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`** — see [add_connection](#add_connection).
 
 ### list_indexes
 
@@ -822,6 +867,20 @@ The server enforces strict SQL validation:
 CREATE USER 'mcp'@'localhost' IDENTIFIED BY 'strongpass';
 GRANT SELECT ON *.* TO 'mcp'@'localhost';
 ```
+
+### Runtime connection registration (add_connection)
+
+When **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`** (and extended mode), any MCP client that can invoke tools may call **`add_connection`**. The server does **not** add a separate HTTP Basic/API-key layer beyond whatever protects your MCP transport (e.g. local stdio, host-bound HTTP with your own reverse proxy). **Treat MCP access as privileged:** anyone who can call tools can attempt to register a new outbound DSN to hosts reachable from the server.
+
+**Controls enforced by the server today:**
+
+- **DSN parsing:** Invalid DSNs are rejected before opening a connection.
+- **User blocklist:** The literal MySQL user **`root`** is rejected for runtime registration to reduce accidental high-privilege pools.
+- **Duplicate names:** Registration is refused if the name already exists (`ConnectionManager`); adds are not silently merged with static config names.
+- **Connectivity check:** A pool is opened and **`Ping()`** runs before the connection is considered registered; failures do not leave a half-open registration (failed adds are rolled back if activation fails after add).
+- **Read-only mode:** If **`MYSQL_MCP_STRICT_READ_ONLY=1`**, new pools still get `transaction_read_only=ON` on the driver path like other connections.
+
+**Operational guidance:** Disable **`MYSQL_MCP_ENABLE_ADD_CONNECTION`** (default `0`) unless you need runtime registration. Prefer firewall/network policies so the server host can only reach approved database endpoints. Use least-privilege MySQL users in registered DSNs (same as [Recommended MySQL User](#recommended-mysql-user)). Review [Multi-DSN Configuration](#multi-dsn-configuration) for how static and runtime entries coexist in one process.
 
 ## Observability
 
@@ -1227,6 +1286,8 @@ Use `--silent` to suppress INFO/WARN logs when running under a service manager. 
 
 **Discovery (`GET /api`):** The JSON response includes an **`endpoints`** map that lists **only routes the server has registered** for the current configuration—same rules as the mux: core routes always; extended routes only if **`MYSQL_MCP_EXTENDED=1`**; **`/api/processlist`** and **`/api/kill`** only if extended **and** **`MYSQL_MCP_PROCESS_ADMIN=1`**; **`/api/audit-log`** only if extended **and** read-audit is enabled (**`MYSQL_MCP_READ_AUDIT_TOOL=1`** with **`MYSQL_MCP_AUDIT_LOG`**); **`/api/slow-log`** only if extended **and** **`MYSQL_MCP_SLOW_QUERY_TOOL=1`**; vector routes only if **`MYSQL_MCP_VECTOR=1`**; **`/status`** appears in the index only when the token card is enabled. **`modes`** in the JSON reflects **`extended`**, **`vector`**, and **`token_card`**.
 
+**Runtime DSN registration:** There is **no** HTTP route to register a new connection. The MCP tool **`add_connection`** (optional; **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**) is the only supported registration path. REST clients use the table below to **list** and **switch** among connections already loaded (config + any runtime adds from MCP).
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
@@ -1237,8 +1298,12 @@ Use `--silent` to suppress INFO/WARN logs when running under a service manager. 
 | POST | `/api/query` | Run SQL query |
 | GET | `/api/ping` | Ping database |
 | GET | `/api/server-info` | Server info |
-| GET | `/api/connections` | List connections |
-| POST | `/api/connections/use` | Switch connection |
+| GET | `/api/connections` | List connections (masked DSNs; includes runtime-registered names once added via MCP) |
+| POST | `/api/connections/use` | Switch active connection: JSON body `{"name": "<connection_name>"}`. Invalid JSON or missing `name` → **`400`**. Unknown connection name → **`200`** with **`success: false`** in the JSON body (same semantics as MCP `use_connection`). |
+
+**`POST /api/connections/use` response:** JSON with `success`, `active`, `message`, `database` when applicable (see [Response Format](#response-format)).
+
+**Not implemented over HTTP:** `POST /api/connections` (register new DSN) — use MCP **`add_connection`** when enabled.
 
 **Extended endpoints** (requires `MYSQL_MCP_EXTENDED=1`):
 
@@ -1294,6 +1359,15 @@ curl -X POST http://localhost:9306/api/query \
 ```bash
 curl http://localhost:9306/api/server-info
 ```
+
+**List / switch connections (no HTTP “add” endpoint):**
+```bash
+curl http://localhost:9306/api/connections
+curl -X POST http://localhost:9306/api/connections/use \
+  -H "Content-Type: application/json" \
+  -d '{"name": "staging"}'
+```
+Registering a **new** DSN at runtime is **MCP-only** via the **`add_connection`** tool when **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`** (see [add_connection](#add_connection)).
 
 ### Response Format
 
