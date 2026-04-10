@@ -622,7 +622,7 @@ Output:
 
 ### add_connection
 
-**MCP only.** Registers a new named MySQL connection at runtime and switches the **process-wide** active connection to it. There is **no** `curl`/REST equivalent; HTTP clients continue to use [`GET /api/connections`](#api-endpoints) and [`POST /api/connections/use`](#api-endpoints) only for connections already present in the server.
+**MCP only.** Available when the server runs in **MCP mode** (stdio) with **`MYSQL_MCP_EXTENDED=1`** and **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**. It registers a new named MySQL connection at runtime and switches the **process-wide** active connection for **that MCP process**. There is **no** HTTP route to register a new DSN. **REST API mode** (`MYSQL_MCP_HTTP=1`) is a **separate** process: [`GET /api/connections`](#api-endpoints) and [`POST /api/connections/use`](#api-endpoints) only list and switch connections **loaded in that HTTP server instance**—they do **not** see names added via MCP in a stdio process, and MCP does not reach into a separate HTTP-only deployment.
 
 Enable:
 
@@ -870,7 +870,7 @@ GRANT SELECT ON *.* TO 'mcp'@'localhost';
 
 ### Runtime connection registration (add_connection)
 
-When **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`** (and extended mode), any MCP client that can invoke tools may call **`add_connection`**. The server does **not** add a separate HTTP Basic/API-key layer beyond whatever protects your MCP transport (e.g. local stdio, host-bound HTTP with your own reverse proxy). **Treat MCP access as privileged:** anyone who can call tools can attempt to register a new outbound DSN to hosts reachable from the server.
+When **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`** (and extended mode), any MCP client that can invoke tools may call **`add_connection`**. This server exposes MCP over **stdio** by default; it does **not** add a separate HTTP Basic/API-key layer beyond whatever protects access to that MCP process (typically local stdio from the host application). **Treat MCP access as privileged:** anyone who can call tools can attempt to register a new outbound DSN to hosts reachable from the server. If you also run **REST API mode** (`MYSQL_MCP_HTTP=1`) in another process or deployment, secure that interface independently—it is separate from MCP.
 
 **Controls enforced by the server today:**
 
@@ -1286,7 +1286,7 @@ Use `--silent` to suppress INFO/WARN logs when running under a service manager. 
 
 **Discovery (`GET /api`):** The JSON response includes an **`endpoints`** map that lists **only routes the server has registered** for the current configuration—same rules as the mux: core routes always; extended routes only if **`MYSQL_MCP_EXTENDED=1`**; **`/api/processlist`** and **`/api/kill`** only if extended **and** **`MYSQL_MCP_PROCESS_ADMIN=1`**; **`/api/audit-log`** only if extended **and** read-audit is enabled (**`MYSQL_MCP_READ_AUDIT_TOOL=1`** with **`MYSQL_MCP_AUDIT_LOG`**); **`/api/slow-log`** only if extended **and** **`MYSQL_MCP_SLOW_QUERY_TOOL=1`**; vector routes only if **`MYSQL_MCP_VECTOR=1`**; **`/status`** appears in the index only when the token card is enabled. **`modes`** in the JSON reflects **`extended`**, **`vector`**, and **`token_card`**.
 
-**Runtime DSN registration:** There is **no** HTTP route to register a new connection. The MCP tool **`add_connection`** (optional; **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**) is the only supported registration path. REST clients use the table below to **list** and **switch** among connections already loaded (config + any runtime adds from MCP).
+**Runtime DSN registration:** There is **no** HTTP route to register a new connection. The MCP tool **`add_connection`** (optional; **`MYSQL_MCP_EXTENDED=1`** and **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**) is the only supported registration path and applies to the **MCP (stdio) process** only. In **REST API mode**, the process never registers tools; `GET /api/connections` lists only connections configured for **that HTTP server process** (not connections added by MCP elsewhere).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -1298,7 +1298,7 @@ Use `--silent` to suppress INFO/WARN logs when running under a service manager. 
 | POST | `/api/query` | Run SQL query |
 | GET | `/api/ping` | Ping database |
 | GET | `/api/server-info` | Server info |
-| GET | `/api/connections` | List connections (masked DSNs; includes runtime-registered names once added via MCP) |
+| GET | `/api/connections` | List connections (masked DSNs) known to **this HTTP server process** (config-loaded; no MCP `add_connection` in REST mode) |
 | POST | `/api/connections/use` | Switch active connection: JSON body `{"name": "<connection_name>"}`. Invalid JSON or missing `name` → **`400`**. Unknown connection name → **`200`** with **`success: false`** in the JSON body (same semantics as MCP `use_connection`). |
 
 **`POST /api/connections/use` response:** JSON with `success`, `active`, `message`, `database` when applicable (see [Response Format](#response-format)).

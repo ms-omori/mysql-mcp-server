@@ -467,8 +467,9 @@ func registerExtendedTools(server *mcp.Server) {
 
 	if os.Getenv("MYSQL_MCP_ENABLE_ADD_CONNECTION") == "1" {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:        "add_connection",
-			Description: "Register and switch to a new MySQL connection at runtime. Requires MYSQL_MCP_ENABLE_ADD_CONNECTION=1.",
+			Name: "add_connection",
+			Description: "Register and switch to a new MySQL connection at runtime. " +
+				"Requires extended mode (MYSQL_MCP_EXTENDED=1) and MYSQL_MCP_ENABLE_ADD_CONNECTION=1.",
 		}, wrapTool("add_connection", wrapAddConnection(connManager, cfg)))
 	}
 }
