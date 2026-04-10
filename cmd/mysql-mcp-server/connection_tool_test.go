@@ -22,6 +22,11 @@ func TestToolAddConnectionValidation(t *testing.T) {
 			wantErrSubs: "security policy: runtime registration of 'root' user is not allowed",
 		},
 		{
+			name:        "root user rejected case variant",
+			input:       AddConnectionInput{Name: "test-root2", DSN: "Root:secret@tcp(localhost:3306)/db"},
+			wantErrSubs: "security policy: runtime registration of 'root' user is not allowed",
+		},
+		{
 			name:        "empty name",
 			input:       AddConnectionInput{Name: "", DSN: "user:pass@tcp(localhost:3306)/db"},
 			wantErrSubs: "name and dsn are required",
@@ -52,6 +57,18 @@ func TestToolAddConnectionValidation(t *testing.T) {
 				t.Errorf("error %q does not contain expected substring %q", err.Error(), tc.wantErrSubs)
 			}
 		})
+	}
+}
+
+func TestToolAddConnectionNilManager(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{}
+	_, _, err := toolAddConnection(ctx, &mcp.CallToolRequest{}, AddConnectionInput{
+		Name: "x",
+		DSN:  "user:pass@tcp(localhost:3306)/db",
+	}, nil, cfg)
+	if err == nil || !strings.Contains(err.Error(), "connection manager not initialized") {
+		t.Fatalf("expected connection manager error, got %v", err)
 	}
 }
 

@@ -872,6 +872,10 @@ func toolAddConnection(
 	cm *ConnectionManager,
 	cfg *config.Config,
 ) (*mcp.CallToolResult, AddConnectionOutput, error) {
+	if cm == nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("connection manager not initialized")
+	}
+
 	name := strings.TrimSpace(input.Name)
 	dsn := strings.TrimSpace(input.DSN)
 	if name == "" || dsn == "" {
@@ -883,7 +887,7 @@ func toolAddConnection(
 	if err != nil {
 		return nil, AddConnectionOutput{}, fmt.Errorf("invalid DSN: %w", err)
 	}
-	if mysqlCfg.User == "root" {
+	if strings.EqualFold(strings.TrimSpace(mysqlCfg.User), "root") {
 		return nil, AddConnectionOutput{}, fmt.Errorf("security policy: runtime registration of 'root' user is not allowed")
 	}
 

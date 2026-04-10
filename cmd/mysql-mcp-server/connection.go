@@ -28,6 +28,14 @@ const (
 // ===== Multi-DSN Connection Manager =====
 
 // ConnectionManager manages multiple MySQL connections.
+//
+// Locking: mu is an RWMutex. Short write locks (Lock) protect mutations: registering or
+// removing connections, changing activeConn, and tunnelCloser bookkeeping. Read locks
+// (RLock) are used for concurrent readers: GetActive, GetActiveDB, List, GetServerType.
+// addConnectionWithPoolConfig holds Lock only for brief check-and-register sections; Ping,
+// SSH tunnel setup, and server-type detection run without mu so readers are not blocked.
+// Avoid calling other exported ConnectionManager methods while holding Lock to prevent
+// deadlock (those methods take their own locks).
 type ConnectionManager struct {
 	connections   map[string]*sql.DB
 	configs       map[string]config.ConnectionConfig
@@ -104,34 +112,44 @@ func (cm *ConnectionManager) AddConnectionIfAbsentWithPoolConfig(ctx context.Con
 	return cm.addConnectionWithPoolConfig(ctx, connCfg, cfg, false)
 }
 
+// tearDownNamedConnection removes an existing registration under cm.mu (must hold lock).
+func (cm *ConnectionManager) tearDownNamedConnection(name string) {
+	if existing, ok := cm.connections[name]; ok {
+		existing.Close()
+		delete(cm.connections, name)
+		delete(cm.configs, name)
+		delete(cm.serverTypes, name)
+		if closeTunnel := cm.tunnelClosers[name]; closeTunnel != nil {
+			closeTunnel()
+			delete(cm.tunnelClosers, name)
+		}
+		if cm.activeConn == name {
+			cm.activeConn = ""
+		}
+	}
+}
+
 // addConnectionWithPoolConfig implements add/replace. When replace is false and the name exists,
 // returns ErrConnectionAlreadyExists without modifying state.
+//
+// When replace is true, the existing registration (pool, tunnel, config) stays in place until
+// the new DSN has been fully opened, pinged, and server-typed; tearDownNamedConnection runs
+// only in the final lock section after validation, so a failed replace does not remove a
+// working pool.
+//
+// Ping, server-type detection, and SSH tunnel setup run without holding cm.mu so concurrent
+// readers (getDB, List, GetActive, SetActive) are not blocked for multiple ping timeouts.
 func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, connCfg config.ConnectionConfig, cfg *config.Config, replace bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
 	if _, exists := cm.connections[connCfg.Name]; exists && !replace {
+		cm.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
 	}
-
-	// If replacing an existing connection, close it and its tunnel first to avoid leaks
-	if existing, ok := cm.connections[connCfg.Name]; ok && replace {
-		existing.Close()
-		delete(cm.connections, connCfg.Name)
-		delete(cm.configs, connCfg.Name)
-		delete(cm.serverTypes, connCfg.Name)
-		if closeTunnel := cm.tunnelClosers[connCfg.Name]; closeTunnel != nil {
-			closeTunnel()
-			delete(cm.tunnelClosers, connCfg.Name)
-		}
-		if cm.activeConn == connCfg.Name {
-			cm.activeConn = ""
-		}
-	}
+	cm.mu.Unlock()
 
 	dsn := config.ApplySSLToDSN(connCfg.DSN, connCfg.SSL)
 	var err error
@@ -142,6 +160,16 @@ func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, co
 	dsn, err = applyStrictReadOnlyDSN(dsn, cfg.StrictReadOnly)
 	if err != nil {
 		return fmt.Errorf("failed to parse DSN for %s: %w", connCfg.Name, err)
+	}
+
+	var tunnelCloser func()
+	cleanupLocal := func(conn *sql.DB) {
+		if conn != nil {
+			conn.Close()
+		}
+		if tunnelCloser != nil {
+			tunnelCloser()
+		}
 	}
 
 	// If SSH tunnel is configured, start tunnel and rewrite DSN to use local listener
@@ -168,17 +196,14 @@ func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, co
 		if err != nil {
 			return fmt.Errorf("failed to start SSH tunnel for %s: %w", connCfg.Name, err)
 		}
-		cm.tunnelClosers[connCfg.Name] = closeTunnel
+		tunnelCloser = closeTunnel
 		mysqlCfg.Addr = localAddr
 		dsn = mysqlCfg.FormatDSN()
 	}
 
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
-		if closer := cm.tunnelClosers[connCfg.Name]; closer != nil {
-			closer()
-			delete(cm.tunnelClosers, connCfg.Name)
-		}
+		cleanupLocal(nil)
 		return fmt.Errorf("failed to open connection %s: %w", connCfg.Name, err)
 	}
 
@@ -211,23 +236,36 @@ func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, co
 
 	// Test connection with configurable timeout (honors caller ctx for cancellation)
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
-	defer cancel()
-	if err := conn.PingContext(pingCtx); err != nil {
-		conn.Close()
-		if closer := cm.tunnelClosers[connCfg.Name]; closer != nil {
-			closer()
-			delete(cm.tunnelClosers, connCfg.Name)
-		}
+	err = conn.PingContext(pingCtx)
+	cancel()
+	if err != nil {
+		cleanupLocal(conn)
 		return fmt.Errorf("failed to ping connection %s: %w", connCfg.Name, err)
+	}
+
+	// Detect server type with a dedicated context to avoid sharing timeout with PingContext
+	detectCtx, cancelDetect := context.WithTimeout(ctx, pingTimeout)
+	serverType := cm.detectServerType(detectCtx, conn)
+	cancelDetect()
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if _, exists := cm.connections[connCfg.Name]; exists {
+		if !replace {
+			cleanupLocal(conn)
+			return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
+		}
+		// Concurrent replace: winner installs first; remove their registration then publish ours.
+		cm.tearDownNamedConnection(connCfg.Name)
 	}
 
 	cm.connections[connCfg.Name] = conn
 	cm.configs[connCfg.Name] = connCfg
-
-	// Detect server type with a dedicated context to avoid sharing timeout with PingContext
-	detectCtx, cancelDetect := context.WithTimeout(ctx, pingTimeout)
-	defer cancelDetect()
-	cm.serverTypes[connCfg.Name] = cm.detectServerType(detectCtx, conn)
+	cm.serverTypes[connCfg.Name] = serverType
+	if tunnelCloser != nil {
+		cm.tunnelClosers[connCfg.Name] = tunnelCloser
+	}
 
 	// Set as active if it's the first connection
 	if cm.activeConn == "" {
@@ -263,21 +301,10 @@ func (cm *ConnectionManager) RemoveConnection(name string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	db, ok := cm.connections[name]
-	if !ok {
+	if _, ok := cm.connections[name]; !ok {
 		return fmt.Errorf("connection '%s' not found", name)
 	}
-	db.Close()
-	delete(cm.connections, name)
-	delete(cm.configs, name)
-	delete(cm.serverTypes, name)
-	if closeTunnel := cm.tunnelClosers[name]; closeTunnel != nil {
-		closeTunnel()
-		delete(cm.tunnelClosers, name)
-	}
-	if cm.activeConn == name {
-		cm.activeConn = ""
-	}
+	cm.tearDownNamedConnection(name)
 	return nil
 }
 
