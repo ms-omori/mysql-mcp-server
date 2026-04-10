@@ -55,5 +55,5 @@ func TestToolAddConnectionIntegrationAddsAndActivates(t *testing.T) {
 	if active != name || db == nil {
 		t.Fatalf("GetActive: name=%q db_nil=%v", active, db == nil)
 	}
-	_ = cm.Close()
+	cm.Close()
 }
