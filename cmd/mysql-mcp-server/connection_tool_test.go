@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -55,13 +56,19 @@ func TestToolAddConnectionValidation(t *testing.T) {
 }
 
 func TestToolAddConnectionDuplicateName(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+
 	cm := NewConnectionManager()
 	cfg := &config.Config{}
 	ctx := context.Background()
 
-	// Manually pre-populate the connection manager with a mock entry
-	// by injecting via configs map to simulate an existing named connection
+	// Pre-populate like a real registration: same name in connections + configs
 	cm.mu.Lock()
+	cm.connections["existing"] = mockDB
 	cm.configs["existing"] = config.ConnectionConfig{Name: "existing", DSN: "user:pass@tcp(localhost:3306)/db"}
 	cm.mu.Unlock()
 
@@ -70,11 +77,11 @@ func TestToolAddConnectionDuplicateName(t *testing.T) {
 		DSN:  "appuser:pass@tcp(localhost:3306)/db",
 	}
 
-	_, _, err := toolAddConnection(ctx, &mcp.CallToolRequest{}, input, cm, cfg)
-	if err == nil {
+	_, _, addErr := toolAddConnection(ctx, &mcp.CallToolRequest{}, input, cm, cfg)
+	if addErr == nil {
 		t.Fatal("expected error for duplicate connection name, got nil")
 	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("unexpected error: %v", err)
+	if !strings.Contains(addErr.Error(), "already exists") {
+		t.Errorf("unexpected error: %v", addErr)
 	}
 }

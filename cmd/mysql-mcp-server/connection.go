@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -88,14 +89,37 @@ func applyStrictReadOnlyDSN(dsn string, strict bool) (string, error) {
 	return mysqlCfg.FormatDSN(), nil
 }
 
+// ErrConnectionAlreadyExists is returned when AddConnectionIfAbsentWithPoolConfig finds an existing name.
+var ErrConnectionAlreadyExists = errors.New("connection already exists")
+
 // AddConnectionWithPoolConfig adds a new connection with pool configuration.
 // If a connection with the same name already exists, it and its SSH tunnel (if any) are closed and replaced.
 func (cm *ConnectionManager) AddConnectionWithPoolConfig(connCfg config.ConnectionConfig, cfg *config.Config) error {
+	return cm.addConnectionWithPoolConfig(context.Background(), connCfg, cfg, true)
+}
+
+// AddConnectionIfAbsentWithPoolConfig adds a connection only if the name is not already registered.
+// It uses ctx for PingContext and server detection so callers can cancel or bound wait time.
+func (cm *ConnectionManager) AddConnectionIfAbsentWithPoolConfig(ctx context.Context, connCfg config.ConnectionConfig, cfg *config.Config) error {
+	return cm.addConnectionWithPoolConfig(ctx, connCfg, cfg, false)
+}
+
+// addConnectionWithPoolConfig implements add/replace. When replace is false and the name exists,
+// returns ErrConnectionAlreadyExists without modifying state.
+func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, connCfg config.ConnectionConfig, cfg *config.Config, replace bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	if _, exists := cm.connections[connCfg.Name]; exists && !replace {
+		return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
+	}
+
 	// If replacing an existing connection, close it and its tunnel first to avoid leaks
-	if existing, ok := cm.connections[connCfg.Name]; ok {
+	if existing, ok := cm.connections[connCfg.Name]; ok && replace {
 		existing.Close()
 		delete(cm.connections, connCfg.Name)
 		delete(cm.configs, connCfg.Name)
@@ -185,10 +209,10 @@ func (cm *ConnectionManager) AddConnectionWithPoolConfig(connCfg config.Connecti
 	conn.SetConnMaxLifetime(lifetime)
 	conn.SetConnMaxIdleTime(idleTime)
 
-	// Test connection with configurable timeout
-	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	// Test connection with configurable timeout (honors caller ctx for cancellation)
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
-	if err := conn.PingContext(ctx); err != nil {
+	if err := conn.PingContext(pingCtx); err != nil {
 		conn.Close()
 		if closer := cm.tunnelClosers[connCfg.Name]; closer != nil {
 			closer()
@@ -201,9 +225,9 @@ func (cm *ConnectionManager) AddConnectionWithPoolConfig(connCfg config.Connecti
 	cm.configs[connCfg.Name] = connCfg
 
 	// Detect server type with a dedicated context to avoid sharing timeout with PingContext
-	ctxDetect, cancelDetect := context.WithTimeout(context.Background(), pingTimeout)
+	detectCtx, cancelDetect := context.WithTimeout(ctx, pingTimeout)
 	defer cancelDetect()
-	cm.serverTypes[connCfg.Name] = cm.detectServerType(ctxDetect, conn)
+	cm.serverTypes[connCfg.Name] = cm.detectServerType(detectCtx, conn)
 
 	// Set as active if it's the first connection
 	if cm.activeConn == "" {

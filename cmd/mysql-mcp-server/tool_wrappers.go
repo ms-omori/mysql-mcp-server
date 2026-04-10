@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"github.com/askdba/mysql-mcp-server/internal/config"
 	"time"
 
+	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

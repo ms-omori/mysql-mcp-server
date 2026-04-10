@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -75,6 +76,29 @@ func TestApplyDefaultIOTimeoutsPreservesExplicit(t *testing.T) {
 	}
 	if parsed.ReadTimeout != 7*time.Second || parsed.WriteTimeout != 8*time.Second {
 		t.Fatalf("expected explicit timeouts preserved, got read=%v write=%v", parsed.ReadTimeout, parsed.WriteTimeout)
+	}
+}
+
+func TestAddConnectionIfAbsentAlreadyExists(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	cm.connections["dup"] = mockDB
+	cm.configs["dup"] = config.ConnectionConfig{Name: "dup", DSN: "user:pass@tcp(127.0.0.1:3306)/db"}
+	cm.mu.Unlock()
+
+	cfg := &config.Config{}
+	err = cm.AddConnectionIfAbsentWithPoolConfig(context.Background(), config.ConnectionConfig{
+		Name: "dup",
+		DSN:  "other:pass@tcp(127.0.0.1:3306)/db",
+	}, cfg)
+	if err == nil || !errors.Is(err, ErrConnectionAlreadyExists) {
+		t.Fatalf("want ErrConnectionAlreadyExists, got %v", err)
 	}
 }
 

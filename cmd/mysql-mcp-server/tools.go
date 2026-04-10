@@ -4,16 +4,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"github.com/askdba/mysql-mcp-server/internal/config"
-	"github.com/go-sql-driver/mysql"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/askdba/mysql-mcp-server/internal/dbretry"
 	"github.com/askdba/mysql-mcp-server/internal/util"
+	"github.com/go-sql-driver/mysql"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -877,15 +878,7 @@ func toolAddConnection(
 		return nil, AddConnectionOutput{}, fmt.Errorf("name and dsn are required")
 	}
 
-	// 1. Check if name already exists
-	conns := cm.List()
-	for _, c := range conns {
-		if c.Name == name {
-			return nil, AddConnectionOutput{}, fmt.Errorf("connection '%s' already exists", name)
-		}
-	}
-
-	// 2. Safety Check: Reject root user
+	// 1. Safety Check: Reject root user
 	mysqlCfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, AddConnectionOutput{}, fmt.Errorf("invalid DSN: %w", err)
@@ -894,17 +887,20 @@ func toolAddConnection(
 		return nil, AddConnectionOutput{}, fmt.Errorf("security policy: runtime registration of 'root' user is not allowed")
 	}
 
-	// 3. Add connection
+	// 2. Add connection (atomic check-and-add under ConnectionManager lock)
 	connCfg := config.ConnectionConfig{
 		Name:        name,
 		DSN:         dsn,
 		Description: input.Description,
 	}
-	if err := cm.AddConnectionWithPoolConfig(connCfg, cfg); err != nil {
+	if err := cm.AddConnectionIfAbsentWithPoolConfig(ctx, connCfg, cfg); err != nil {
+		if errors.Is(err, ErrConnectionAlreadyExists) {
+			return nil, AddConnectionOutput{}, fmt.Errorf("connection '%s' already exists", name)
+		}
 		return nil, AddConnectionOutput{}, fmt.Errorf("failed to add connection: %w", err)
 	}
 
-	// 4. Automatically switch to it
+	// 3. Automatically switch to it
 	if err := cm.SetActive(name); err != nil {
 		return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w", err)
 	}

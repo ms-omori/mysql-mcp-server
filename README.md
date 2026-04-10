@@ -123,6 +123,7 @@ Environment variables:
 | MYSQL_QUERY_TIMEOUT | No | – | Query timeout in **milliseconds** (e.g. `30000`); used only if `MYSQL_QUERY_TIMEOUT_SECONDS` is unset |
 | MYSQL_POOL_SIZE | No | – | Alias for `MYSQL_MAX_OPEN_CONNS` (pool size); `MYSQL_MAX_OPEN_CONNS` overrides when both are set |
 | MYSQL_MCP_EXTENDED | No | 0 | Enable extended tools (set to 1) |
+| MYSQL_MCP_ENABLE_ADD_CONNECTION | No | 0 | Set `1` to register **`add_connection`** (runtime DSN registration). Requires **`MYSQL_MCP_EXTENDED=1`**. |
 | MYSQL_MCP_JSON_LOGS | No | 0 | Enable JSON structured logging (set to 1) |
 | MYSQL_MCP_TOKEN_TRACKING | No | 0 | Enable estimated token usage tracking (set to 1) |
 | MYSQL_MCP_TOKEN_MODEL | No | cl100k_base | Tokenizer encoding to use for estimation |
