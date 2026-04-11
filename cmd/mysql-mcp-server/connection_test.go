@@ -128,6 +128,25 @@ func TestAddConnectionIfAbsentAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestAddConnectionIfAbsentPendingInFlightBlocksDuplicate(t *testing.T) {
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	if cm.pendingAdds == nil {
+		cm.pendingAdds = make(map[string]struct{})
+	}
+	cm.pendingAdds["inflight"] = struct{}{}
+	cm.mu.Unlock()
+
+	cfg := &config.Config{}
+	err := cm.AddConnectionIfAbsentWithPoolConfig(context.Background(), config.ConnectionConfig{
+		Name: "inflight",
+		DSN:  "user:pass@tcp(127.0.0.1:3306)/db",
+	}, cfg)
+	if err == nil || !errors.Is(err, ErrConnectionAlreadyExists) {
+		t.Fatalf("want ErrConnectionAlreadyExists when name is pending, got %v", err)
+	}
+}
+
 func TestNewConnectionManager(t *testing.T) {
 	cm := NewConnectionManager()
 	if cm == nil {

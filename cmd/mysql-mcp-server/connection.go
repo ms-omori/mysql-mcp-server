@@ -30,9 +30,9 @@ const (
 // ConnectionManager manages multiple MySQL connections.
 //
 // Locking: mu is an RWMutex. Short write locks (Lock) protect mutations: registering or
-// removing connections, changing activeConn, and tunnelCloser bookkeeping. Read locks
-// (RLock) are used for concurrent readers: GetActive, GetActiveDB, List, GetServerType,
-// and the add-if-absent duplicate-name probe in addConnectionWithPoolConfig.
+// removing connections, changing activeConn, tunnelCloser bookkeeping, and pendingAdds
+// (in-flight add-if-absent reservations). Read locks (RLock) are used for concurrent
+// readers: GetActive, GetActiveDB, List, GetServerType.
 // addConnectionWithPoolConfig holds Lock only for brief registration; Ping, SSH tunnel
 // setup, and server-type detection run without mu so readers are not blocked.
 // Avoid calling other exported ConnectionManager methods while holding Lock to prevent
@@ -43,7 +43,10 @@ type ConnectionManager struct {
 	serverTypes   map[string]ServerType
 	activeConn    string
 	tunnelClosers map[string]func() // per-connection SSH tunnel close functions
-	mu            sync.RWMutex
+	// pendingAdds marks names currently in addConnectionWithPoolConfig (!replace) between
+	// reservation and registration, so concurrent adds for the same name fail before I/O.
+	pendingAdds map[string]struct{}
+	mu          sync.RWMutex
 }
 
 // NewConnectionManager creates a new connection manager.
@@ -141,20 +144,37 @@ func (cm *ConnectionManager) tearDownNamedConnection(name string) {
 // Ping, server-type detection, and SSH tunnel setup run without holding cm.mu so concurrent
 // readers (getDB, List, GetActive, SetActive) are not blocked for multiple ping timeouts.
 //
-// For add-if-absent (!replace), only a brief RLock is taken to test name occupancy; the
-// replace path skips this phase (no early lock) and relies on the final Lock after validation.
+// For add-if-absent (!replace), a brief Lock reserves the name in pendingAdds so a concurrent
+// second caller fails with ErrConnectionAlreadyExists before Ping/tunnel work (avoids TOCTOU
+// duplicate I/O). The replace path skips reservation and relies on the final Lock after validation.
 func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, connCfg config.ConnectionConfig, cfg *config.Config, replace bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	if !replace {
-		cm.mu.RLock()
-		_, exists := cm.connections[connCfg.Name]
-		cm.mu.RUnlock()
-		if exists {
+		cm.mu.Lock()
+		if _, exists := cm.connections[connCfg.Name]; exists {
+			cm.mu.Unlock()
 			return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
 		}
+		if cm.pendingAdds == nil {
+			cm.pendingAdds = make(map[string]struct{})
+		}
+		if _, busy := cm.pendingAdds[connCfg.Name]; busy {
+			cm.mu.Unlock()
+			return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
+		}
+		cm.pendingAdds[connCfg.Name] = struct{}{}
+		cm.mu.Unlock()
+
+		defer func() {
+			cm.mu.Lock()
+			if cm.pendingAdds != nil {
+				delete(cm.pendingAdds, connCfg.Name)
+			}
+			cm.mu.Unlock()
+		}()
 	}
 
 	dsn := config.ApplySSLToDSN(connCfg.DSN, connCfg.SSL)
@@ -347,6 +367,7 @@ func (cm *ConnectionManager) Close() {
 		closeFn()
 	}
 	cm.tunnelClosers = make(map[string]func())
+	cm.pendingAdds = nil
 }
 
 // getDB returns the active database connection in a thread-safe manner.
