@@ -31,9 +31,10 @@ const (
 //
 // Locking: mu is an RWMutex. Short write locks (Lock) protect mutations: registering or
 // removing connections, changing activeConn, and tunnelCloser bookkeeping. Read locks
-// (RLock) are used for concurrent readers: GetActive, GetActiveDB, List, GetServerType.
-// addConnectionWithPoolConfig holds Lock only for brief check-and-register sections; Ping,
-// SSH tunnel setup, and server-type detection run without mu so readers are not blocked.
+// (RLock) are used for concurrent readers: GetActive, GetActiveDB, List, GetServerType,
+// and the add-if-absent duplicate-name probe in addConnectionWithPoolConfig.
+// addConnectionWithPoolConfig holds Lock only for brief registration; Ping, SSH tunnel
+// setup, and server-type detection run without mu so readers are not blocked.
 // Avoid calling other exported ConnectionManager methods while holding Lock to prevent
 // deadlock (those methods take their own locks).
 type ConnectionManager struct {
@@ -139,17 +140,22 @@ func (cm *ConnectionManager) tearDownNamedConnection(name string) {
 //
 // Ping, server-type detection, and SSH tunnel setup run without holding cm.mu so concurrent
 // readers (getDB, List, GetActive, SetActive) are not blocked for multiple ping timeouts.
+//
+// For add-if-absent (!replace), only a brief RLock is taken to test name occupancy; the
+// replace path skips this phase (no early lock) and relies on the final Lock after validation.
 func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, connCfg config.ConnectionConfig, cfg *config.Config, replace bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	cm.mu.Lock()
-	if _, exists := cm.connections[connCfg.Name]; exists && !replace {
-		cm.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
+	if !replace {
+		cm.mu.RLock()
+		_, exists := cm.connections[connCfg.Name]
+		cm.mu.RUnlock()
+		if exists {
+			return fmt.Errorf("%w: %s", ErrConnectionAlreadyExists, connCfg.Name)
+		}
 	}
-	cm.mu.Unlock()
 
 	dsn := config.ApplySSLToDSN(connCfg.DSN, connCfg.SSL)
 	var err error

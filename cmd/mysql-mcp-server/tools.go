@@ -867,7 +867,7 @@ func maskResults(cols []string, rows [][]interface{}, patterns []string) {
 
 func toolAddConnection(
 	ctx context.Context,
-	req *mcp.CallToolRequest,
+	_ *mcp.CallToolRequest,
 	input AddConnectionInput,
 	cm *ConnectionManager,
 	cfg *config.Config,
@@ -891,7 +891,7 @@ func toolAddConnection(
 		return nil, AddConnectionOutput{}, fmt.Errorf("security policy: runtime registration of 'root' user is not allowed")
 	}
 
-	// 2. Add connection (atomic check-and-add under ConnectionManager lock)
+	// 2. Add connection (brief duplicate check + register after ping; see AddConnectionIfAbsentWithPoolConfig)
 	connCfg := config.ConnectionConfig{
 		Name:        name,
 		DSN:         dsn,
