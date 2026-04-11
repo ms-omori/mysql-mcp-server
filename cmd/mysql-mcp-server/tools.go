@@ -4,14 +4,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/askdba/mysql-mcp-server/internal/dbretry"
 	"github.com/askdba/mysql-mcp-server/internal/util"
+	"github.com/go-sql-driver/mysql"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -860,4 +863,59 @@ func maskResults(cols []string, rows [][]interface{}, patterns []string) {
 			}
 		}
 	}
+}
+
+func toolAddConnection(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	input AddConnectionInput,
+	cm *ConnectionManager,
+	cfg *config.Config,
+) (*mcp.CallToolResult, AddConnectionOutput, error) {
+	if cm == nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("connection manager not initialized")
+	}
+
+	name := strings.TrimSpace(input.Name)
+	dsn := strings.TrimSpace(input.DSN)
+	if name == "" || dsn == "" {
+		return nil, AddConnectionOutput{}, fmt.Errorf("name and dsn are required")
+	}
+
+	// 1. Safety Check: Reject root user
+	mysqlCfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, AddConnectionOutput{}, fmt.Errorf("invalid DSN: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(mysqlCfg.User), "root") {
+		return nil, AddConnectionOutput{}, fmt.Errorf("security policy: runtime registration of 'root' user is not allowed")
+	}
+
+	// 2. Add connection (brief duplicate check + register after ping; see AddConnectionIfAbsentWithPoolConfig)
+	connCfg := config.ConnectionConfig{
+		Name:        name,
+		DSN:         dsn,
+		Description: input.Description,
+	}
+	if err := cm.AddConnectionIfAbsentWithPoolConfig(ctx, connCfg, cfg); err != nil {
+		if errors.Is(err, ErrConnectionAlreadyExists) {
+			return nil, AddConnectionOutput{}, fmt.Errorf("connection '%s' already exists", name)
+		}
+		return nil, AddConnectionOutput{}, fmt.Errorf("failed to add connection: %w", err)
+	}
+
+	// 3. Automatically switch to it (process-wide active DSN; see spec)
+	if err := cm.SetActive(name); err != nil {
+		if rbErr := cm.RemoveConnection(name); rbErr != nil {
+			return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w (rollback of added connection also failed: %w)", err, rbErr)
+		}
+		return nil, AddConnectionOutput{}, fmt.Errorf("failed to activate connection: %w", err)
+	}
+
+	return nil,
+		AddConnectionOutput{
+			Success: true,
+			Active:  name,
+			Message: fmt.Sprintf("Added and switched to connection '%s'", name),
+		}, nil
 }

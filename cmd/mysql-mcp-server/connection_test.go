@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -75,6 +76,74 @@ func TestApplyDefaultIOTimeoutsPreservesExplicit(t *testing.T) {
 	}
 	if parsed.ReadTimeout != 7*time.Second || parsed.WriteTimeout != 8*time.Second {
 		t.Fatalf("expected explicit timeouts preserved, got read=%v write=%v", parsed.ReadTimeout, parsed.WriteTimeout)
+	}
+}
+
+func TestConnectionManagerRemoveConnection(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	cm.connections["dropme"] = mockDB
+	cm.configs["dropme"] = config.ConnectionConfig{Name: "dropme", DSN: "user:pass@tcp(127.0.0.1:3306)/db"}
+	cm.activeConn = "dropme"
+	cm.mu.Unlock()
+
+	if err := cm.RemoveConnection("dropme"); err != nil {
+		t.Fatalf("RemoveConnection: %v", err)
+	}
+	db, name := cm.GetActive()
+	if db != nil || name != "" {
+		t.Fatalf("expected no active connection after remove, got db=%v name=%q", db != nil, name)
+	}
+	if len(cm.List()) != 0 {
+		t.Fatal("expected List empty after remove")
+	}
+}
+
+func TestAddConnectionIfAbsentAlreadyExists(t *testing.T) {
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	cm.connections["dup"] = mockDB
+	cm.configs["dup"] = config.ConnectionConfig{Name: "dup", DSN: "user:pass@tcp(127.0.0.1:3306)/db"}
+	cm.mu.Unlock()
+
+	cfg := &config.Config{}
+	err = cm.AddConnectionIfAbsentWithPoolConfig(context.Background(), config.ConnectionConfig{
+		Name: "dup",
+		DSN:  "other:pass@tcp(127.0.0.1:3306)/db",
+	}, cfg)
+	if err == nil || !errors.Is(err, ErrConnectionAlreadyExists) {
+		t.Fatalf("want ErrConnectionAlreadyExists, got %v", err)
+	}
+}
+
+func TestAddConnectionIfAbsentPendingInFlightBlocksDuplicate(t *testing.T) {
+	cm := NewConnectionManager()
+	cm.mu.Lock()
+	if cm.pendingAdds == nil {
+		cm.pendingAdds = make(map[string]struct{})
+	}
+	cm.pendingAdds["inflight"] = struct{}{}
+	cm.mu.Unlock()
+
+	cfg := &config.Config{}
+	err := cm.AddConnectionIfAbsentWithPoolConfig(context.Background(), config.ConnectionConfig{
+		Name: "inflight",
+		DSN:  "user:pass@tcp(127.0.0.1:3306)/db",
+	}, cfg)
+	if err == nil || !errors.Is(err, ErrConnectionAlreadyExists) {
+		t.Fatalf("want ErrConnectionAlreadyExists when name is pending, got %v", err)
 	}
 }
 

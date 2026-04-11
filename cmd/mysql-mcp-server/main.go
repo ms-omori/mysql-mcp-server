@@ -464,6 +464,14 @@ func registerExtendedTools(server *mcp.Server) {
 		Name:        "schema_diff",
 		Description: "Compare the schema between two databases",
 	}, toolSchemaDiffWrapped)
+
+	if os.Getenv("MYSQL_MCP_ENABLE_ADD_CONNECTION") == "1" {
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "add_connection",
+			Description: "Register and switch to a new MySQL connection at runtime. " +
+				"Requires extended mode (MYSQL_MCP_EXTENDED=1) and MYSQL_MCP_ENABLE_ADD_CONNECTION=1.",
+		}, wrapTool("add_connection", wrapAddConnection(connManager, cfg)))
+	}
 }
 
 // ===== Config File Commands =====
@@ -535,6 +543,7 @@ CONFIGURATION:
         MYSQL_MCP_PROCESS_ADMIN      Set 1 for process_list / kill_query tools (extended)
         MYSQL_MCP_READ_AUDIT_TOOL    Set 1 for read_audit_log when audit path set
         MYSQL_MCP_SLOW_QUERY_TOOL    Set 1 for slow_query_log tool (extended)
+        MYSQL_MCP_ENABLE_ADD_CONNECTION  Set 1 to register add_connection (runtime DSN registration; extended tools only)
         MYSQL_MCP_VECTOR             Enable vector tools for MySQL 9.0+ (set to 1)
         MYSQL_MCP_HTTP               Enable REST API mode (set to 1)
         MYSQL_MCP_METRICS_HTTP       With stdio MCP only: serve /status and /api/metrics/tokens on MYSQL_HTTP_PORT (set to 1); not used when MYSQL_MCP_HTTP=1
@@ -611,6 +620,7 @@ MCP TOOLS:
     Core: list_databases, list_tables, describe_table, run_query, ping, server_info
     Connections: list_connections, use_connection
     Extended: list_indexes, show_create_table, explain_query, list_views, etc.
+    Optional extended: add_connection (requires MYSQL_MCP_ENABLE_ADD_CONNECTION=1)
     Vector: vector_search, vector_info (MySQL 9.0+)
 
 SECURITY:

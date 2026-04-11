@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/askdba/mysql-mcp-server/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -99,3 +100,9 @@ var (
 	toolReadAuditLogWrapped = wrapTool("read_audit_log", toolReadAuditLog)
 	toolSlowQueryLogWrapped = wrapTool("slow_query_log", toolSlowQueryLog)
 )
+
+func wrapAddConnection(cm *ConnectionManager, cfg *config.Config) func(context.Context, *mcp.CallToolRequest, AddConnectionInput) (*mcp.CallToolResult, AddConnectionOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input AddConnectionInput) (*mcp.CallToolResult, AddConnectionOutput, error) {
+		return toolAddConnection(ctx, req, input, cm, cfg)
+	}
+}
