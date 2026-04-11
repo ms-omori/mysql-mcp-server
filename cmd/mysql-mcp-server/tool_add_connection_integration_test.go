@@ -34,6 +34,8 @@ func TestToolAddConnectionIntegrationAddsAndActivates(t *testing.T) {
 	}
 
 	cm := NewConnectionManager()
+	defer cm.Close()
+
 	name := fmt.Sprintf("add_conn_integ_%d", time.Now().UnixNano())
 	input := AddConnectionInput{
 		Name:        name,
@@ -55,5 +57,4 @@ func TestToolAddConnectionIntegrationAddsAndActivates(t *testing.T) {
 	if active != name || db == nil {
 		t.Fatalf("GetActive: name=%q db_nil=%v", active, db == nil)
 	}
-	cm.Close()
 }
