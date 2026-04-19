@@ -7,6 +7,31 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-04-19
+
+General availability release. Promotes rc.4 to GA plus CI/release pipeline hardening.
+
+### Added
+
+- **`add_connection`** (optional): register a new named MySQL connection at runtime via MCP when **`MYSQL_MCP_EXTENDED=1`** and **`MYSQL_MCP_ENABLE_ADD_CONNECTION=1`**; rejects duplicate names, invalid DSNs, and the **`root`** MySQL user ([#106](https://github.com/askdba/mysql-mcp-server/issues/106)).
+- **`search_schema`**: Find tables and columns matching a pattern across all accessible databases.
+- **`schema_diff`**: Compare table and column structures between two databases.
+- **Column Masking**: Redact sensitive data in `run_query` results using **`MYSQL_MCP_MASK_COLUMNS`** (e.g., `email,password,token`).
+- **`run_query`** / **`ping`**: exponential-backoff retries for transient MySQL/network errors, with pool **`Ping`** after **`driver.ErrBadConn`** ([#110](https://github.com/askdba/mysql-mcp-server/issues/110), [#121](https://github.com/askdba/mysql-mcp-server/issues/121)).
+- **`run_query`**: **`offset`** pagination for SELECT/UNION, returning **`has_more`** and **`next_offset`** ([#111](https://github.com/askdba/mysql-mcp-server/issues/111)).
+- **`MYSQL_MCP_METRICS_HTTP`**: optional HTTP sidecar for `/status` and `/api/metrics/tokens` while MCP uses stdio ([#102](https://github.com/askdba/mysql-mcp-server/issues/102)).
+
+### Security
+
+- **SSH bastion host keys**: tunnel verifies server host key by default using `known_hosts`; opt-out requires `MYSQL_SSH_STRICT_HOST_KEY_CHECKING=false`.
+
+### Changed
+
+- **`getEnvBool`**: accepts `true`, `yes`, `on`, `y` (case-insensitive) in addition to `1` for all `MYSQL_MCP_*` flags.
+- **CI/release pipeline** ([#128](https://github.com/askdba/mysql-mcp-server/issues/128)): pre-release QA gate in `release.yml` (unit + integration tests run before GoReleaser fires); `gofmt -l` format enforcement; integration test failures now block `qa-summary`; `golangci-lint` pinned to `v1.64.8`.
+
+---
+
 ## [1.7.0-rc.4] - 2026-04-11
 
 Fourth release candidate: optional runtime DSN registration (`add_connection`), SSH bastion host key verification by default, and extended tooling improvements.
