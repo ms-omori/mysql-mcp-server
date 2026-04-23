@@ -194,3 +194,120 @@ func TestSQLValidationError(t *testing.T) {
 		t.Errorf("unexpected error message: %s", err2.Error())
 	}
 }
+
+func TestValidateWriteSQL(t *testing.T) {
+	tests := []struct {
+		name      string
+		sql       string
+		wantError bool
+	}{
+		// Allowed DML
+		{"insert", "INSERT INTO users (name) VALUES ('test')", false},
+		{"insert multiple rows", "INSERT INTO users (name) VALUES ('a'), ('b')", false},
+		{"update with where", "UPDATE users SET name = 'test' WHERE id = 1", false},
+		{"delete with where", "DELETE FROM users WHERE id = 1", false},
+		{"replace", "REPLACE INTO users (id, name) VALUES (1, 'test')", false},
+		{"insert lowercase", "insert into users (name) values ('test')", false},
+		{"trailing semicolon", "INSERT INTO users (name) VALUES ('test');", false},
+
+		// Rejected read-only statements (belong in run_query)
+		{"select", "SELECT * FROM users", true},
+		{"show databases", "SHOW DATABASES", true},
+		{"describe table", "DESCRIBE users", true},
+
+		// Rejected DDL
+		{"create table", "CREATE TABLE users (id INT)", true},
+		{"alter table", "ALTER TABLE users ADD column email VARCHAR(255)", true},
+		{"drop table", "DROP TABLE users", true},
+		{"truncate table", "TRUNCATE TABLE users", true},
+
+		// Rejected admin
+		{"grant", "GRANT SELECT ON *.* TO 'user'@'localhost'", true},
+		{"flush", "FLUSH PRIVILEGES", true},
+		{"kill", "KILL 1234", true},
+		{"set global", "SET GLOBAL max_connections = 100", true},
+
+		// Rejected transactions
+		{"begin", "BEGIN", true},
+		{"commit", "COMMIT", true},
+		{"rollback", "ROLLBACK", true},
+		{"start transaction", "START TRANSACTION", true},
+
+		// Rejected multi-statement
+		{"multi insert drop", "INSERT INTO t (a) VALUES (1); DROP TABLE t", true},
+		{"multi update select", "UPDATE t SET a=1; SELECT * FROM t", true},
+
+		// Rejected dangerous functions
+		{"update with sleep", "UPDATE users SET name = 'x' WHERE SLEEP(1)", true},
+		{"insert with load_file", "INSERT INTO t (data) VALUES (LOAD_FILE('/etc/passwd'))", true},
+		{"update with benchmark", "UPDATE t SET a = BENCHMARK(1000, MD5('x'))", true},
+
+		// Rejected system schema access
+		{"insert into mysql.user", "INSERT INTO mysql.user (User) VALUES ('x')", true},
+		{"update information_schema", "UPDATE INFORMATION_SCHEMA.tables SET t = 1", true},
+		{"delete from mysql.user", "DELETE FROM mysql.user WHERE user = 'x'", true},
+
+		// Rejected INTO OUTFILE/DUMPFILE
+		{"select into outfile", "SELECT * FROM users INTO OUTFILE '/tmp/x'", true},
+
+		// Rejected comments
+		{"insert with line comment", "INSERT INTO users (name) VALUES ('x') -- comment", true},
+		{"insert with block comment", "INSERT INTO users /* comment */ (name) VALUES ('x')", true},
+
+		// Empty / invalid
+		{"empty", "", true},
+		{"whitespace only", "   ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateWriteSQL(tt.sql)
+			if tt.wantError && err == nil {
+				t.Errorf("expected error for %q but got none", tt.sql)
+			}
+			if !tt.wantError && err != nil {
+				t.Errorf("unexpected error for %q: %v", tt.sql, err)
+			}
+		})
+	}
+}
+
+func TestValidateWriteSQLCombined(t *testing.T) {
+	// Focused integration test: ensure parser + regex validators agree.
+	tests := []struct {
+		name      string
+		sql       string
+		wantError bool
+	}{
+		{"insert values", "INSERT INTO users (id, name) VALUES (1, 'a')", false},
+		{"insert select", "INSERT INTO archive SELECT * FROM users WHERE active = 0", false},
+		{"update with subquery", "UPDATE users SET name = (SELECT name FROM source WHERE id = 1) WHERE id = 1", false},
+		{"delete with join", "DELETE u FROM users u JOIN old o ON u.id = o.id", false},
+		{"insert on duplicate", "INSERT INTO users (id, name) VALUES (1, 'a') ON DUPLICATE KEY UPDATE name = 'a'", false},
+
+		// Rejected
+		{"ddl create", "CREATE TABLE x (id INT)", true},
+		{"select", "SELECT 1", true},
+		{"insert subquery to mysql schema", "INSERT INTO archive SELECT * FROM mysql.user", true},
+		{"insert with nested subquery to mysql schema", "INSERT INTO archive SELECT id FROM users WHERE id IN (SELECT User FROM mysql.user)", true},
+		{"update with sleep in set", "UPDATE t SET a = SLEEP(1)", true},
+		{"insert on duplicate with sleep", "INSERT INTO t (a) VALUES (1) ON DUPLICATE KEY UPDATE a = SLEEP(1)", true},
+		{"insert values with sleep", "INSERT INTO t (a) VALUES (SLEEP(1))", true},
+		{"replace into mysql schema", "REPLACE INTO mysql.user (User) VALUES ('x')", true},
+		{"multi-table delete from mysql", "DELETE t1 FROM users t1 JOIN mysql.user mu ON t1.name = mu.User", true},
+		// Prefix boundary: INSERTX should not be accepted as INSERT.
+		{"prefix boundary insertx", "INSERTX INTO t (a) VALUES (1)", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateWriteSQLCombined(tt.sql)
+			if tt.wantError && err == nil {
+				t.Errorf("expected error for %q but got none", tt.sql)
+			}
+			if !tt.wantError && err != nil {
+				t.Errorf("unexpected error for %q: %v", tt.sql, err)
+			}
+		})
+	}
+}

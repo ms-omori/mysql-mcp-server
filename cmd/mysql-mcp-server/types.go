@@ -64,6 +64,17 @@ type QueryResult struct {
 	Warning    string          `json:"warning,omitempty" jsonschema:"performance or usage warning, if any"`
 }
 
+type ExecuteInput struct {
+	SQL      string `json:"sql" jsonschema:"write SQL statement; must be INSERT, UPDATE, DELETE, or REPLACE. Multi-statement queries and DDL are rejected. Requires the active connection to be writable (read_only=false)."`
+	Database string `json:"database,omitempty" jsonschema:"optional database name to USE before running the statement"`
+}
+
+type ExecuteResult struct {
+	AffectedRows int64  `json:"affected_rows" jsonschema:"number of rows inserted, updated, or deleted"`
+	LastInsertID int64  `json:"last_insert_id,omitempty" jsonschema:"auto-increment value generated for the INSERT (0 when not applicable)"`
+	Connection   string `json:"connection,omitempty" jsonschema:"active connection name that executed the statement"`
+}
+
 type PingInput struct{}
 
 type PingOutput struct {

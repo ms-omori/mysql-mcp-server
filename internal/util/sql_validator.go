@@ -246,6 +246,127 @@ func IsReadOnlySQL(sqlText string) bool {
 	return ValidateSQL(sqlText) == nil
 }
 
+// Blocked patterns for the write validator. These are the read-only blocklist
+// minus the DML entries (INSERT/UPDATE/DELETE/REPLACE), which are explicitly
+// allowed in write mode.
+//
+// DDL, administrative commands, user-controlled transactions, and dangerous
+// functions remain blocked. This mirrors blockedPatterns above.
+var blockedWritePatterns = []*regexp.Regexp{
+	// File operations
+	regexp.MustCompile(`(?i)\bLOAD_FILE\s*\(`),
+	regexp.MustCompile(`(?i)\bINTO\s+OUTFILE\b`),
+	regexp.MustCompile(`(?i)\bINTO\s+DUMPFILE\b`),
+	regexp.MustCompile(`(?i)\bLOAD\s+DATA\b`),
+
+	// DDL statements
+	regexp.MustCompile(`(?i)^\s*CREATE\b`),
+	regexp.MustCompile(`(?i)^\s*ALTER\b`),
+	regexp.MustCompile(`(?i)^\s*DROP\b`),
+	regexp.MustCompile(`(?i)^\s*TRUNCATE\b`),
+	regexp.MustCompile(`(?i)^\s*RENAME\b`),
+
+	// Administrative commands
+	regexp.MustCompile(`(?i)^\s*GRANT\b`),
+	regexp.MustCompile(`(?i)^\s*REVOKE\b`),
+	regexp.MustCompile(`(?i)^\s*SET\s+(GLOBAL|SESSION|@@)`),
+	regexp.MustCompile(`(?i)^\s*FLUSH\b`),
+	regexp.MustCompile(`(?i)^\s*RESET\b`),
+	regexp.MustCompile(`(?i)^\s*KILL\b`),
+	regexp.MustCompile(`(?i)^\s*SHUTDOWN\b`),
+
+	// Locking
+	regexp.MustCompile(`(?i)^\s*LOCK\s+TABLES\b`),
+	regexp.MustCompile(`(?i)^\s*UNLOCK\s+TABLES\b`),
+
+	// Transactions (not allowed; each write runs as a single auto-committed statement)
+	regexp.MustCompile(`(?i)^\s*START\s+TRANSACTION\b`),
+	regexp.MustCompile(`(?i)^\s*BEGIN\b`),
+	regexp.MustCompile(`(?i)^\s*COMMIT\b`),
+	regexp.MustCompile(`(?i)^\s*ROLLBACK\b`),
+	regexp.MustCompile(`(?i)^\s*SAVEPOINT\b`),
+
+	// Prepared statements
+	regexp.MustCompile(`(?i)^\s*PREPARE\b`),
+	regexp.MustCompile(`(?i)^\s*EXECUTE\b`),
+	regexp.MustCompile(`(?i)^\s*DEALLOCATE\b`),
+
+	// Stored procedure calls
+	regexp.MustCompile(`(?i)^\s*CALL\b`),
+
+	// Dangerous functions
+	regexp.MustCompile(`(?i)\bSLEEP\s*\(`),
+	regexp.MustCompile(`(?i)\bBENCHMARK\s*\(`),
+	regexp.MustCompile(`(?i)\bGET_LOCK\s*\(`),
+	regexp.MustCompile(`(?i)\bRELEASE_LOCK\s*\(`),
+	regexp.MustCompile(`(?i)\bIS_FREE_LOCK\s*\(`),
+	regexp.MustCompile(`(?i)\bIS_USED_LOCK\s*\(`),
+
+	// SQL comments (could hide malicious SQL)
+	regexp.MustCompile(`--`),
+	regexp.MustCompile(`/\*`),
+
+	// System schema access
+	regexp.MustCompile(`(?i)\bMYSQL\s*\.\b`),
+	regexp.MustCompile(`(?i)\bINFORMATION_SCHEMA\s*\.\b`),
+	regexp.MustCompile(`(?i)\bPERFORMANCE_SCHEMA\s*\.\b`),
+	regexp.MustCompile(`(?i)\bSYS\s*\.\b`),
+}
+
+// Allowed query prefixes for write mode.
+var allowedWritePrefixes = []string{
+	"INSERT",
+	"UPDATE",
+	"DELETE",
+	"REPLACE",
+}
+
+// ValidateWriteSQL performs SQL safety validation for DML write statements.
+// Allows INSERT, UPDATE, DELETE, and REPLACE. Still blocks DDL, admin commands,
+// transactions, dangerous functions, and system schema access.
+func ValidateWriteSQL(sqlText string) error {
+	s := strings.TrimSpace(sqlText)
+	if s == "" {
+		return &SQLValidationError{Reason: "empty query"}
+	}
+
+	scan := stripSQLLiterals(s)
+
+	// Reject multi-statement queries (semicolon allowed only at end).
+	cleaned := strings.TrimRight(scan, "; \t\n\r")
+	if strings.Contains(cleaned, ";") {
+		return &SQLValidationError{
+			Reason:  "multi-statement queries are not allowed",
+			Pattern: ";",
+		}
+	}
+
+	for _, pattern := range blockedWritePatterns {
+		target := s
+		if !strings.Contains(pattern.String(), "^") {
+			target = scan
+		}
+		if pattern.MatchString(target) {
+			return &SQLValidationError{
+				Reason:  "query contains blocked pattern",
+				Pattern: pattern.String(),
+			}
+		}
+	}
+
+	upper := strings.ToUpper(s)
+	for _, prefix := range allowedWritePrefixes {
+		if upper == prefix || strings.HasPrefix(upper, prefix+" ") ||
+			strings.HasPrefix(upper, prefix+"\t") || strings.HasPrefix(upper, prefix+"\n") {
+			return nil
+		}
+	}
+
+	return &SQLValidationError{
+		Reason: "only INSERT, UPDATE, DELETE, and REPLACE statements are allowed",
+	}
+}
+
 // ValidateSelectColumns validates and quotes column names in a SELECT list.
 // Accepts: "col1, col2, col3" or "col1 AS alias, col2"
 // Returns quoted column string or error if invalid.

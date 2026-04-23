@@ -70,6 +70,7 @@ var (
 	toolListTablesWrapped      = wrapTool("list_tables", toolListTables)
 	toolDescribeTableWrapped   = wrapTool("describe_table", toolDescribeTable)
 	toolRunQueryWrapped        = toolRunQuery // run_query has dedicated query/audit logs with tokens
+	toolExecuteWrapped         = toolExecute  // execute has dedicated query/audit logs with tokens
 	toolPingWrapped            = wrapTool("ping", toolPing)
 	toolServerInfoWrapped      = wrapTool("server_info", toolServerInfo)
 	toolListConnectionsWrapped = wrapTool("list_connections", toolListConnections)

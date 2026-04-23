@@ -347,6 +347,7 @@ func loadConnections() ([]ConnectionConfig, error) {
 			DSN:         dsn,
 			Description: "Default connection",
 			SSL:         globalSSL,
+			ReadOnly:    getEnvBool("MYSQL_DSN_READ_ONLY"),
 		}
 		if globalSSH != nil {
 			c.SSH = globalSSH
@@ -359,6 +360,7 @@ func loadConnections() ([]ConnectionConfig, error) {
 		nameKey := fmt.Sprintf("MYSQL_DSN_%d_NAME", i)
 		descKey := fmt.Sprintf("MYSQL_DSN_%d_DESC", i)
 		sslKey := fmt.Sprintf("MYSQL_DSN_%d_SSL", i)
+		readOnlyKey := fmt.Sprintf("MYSQL_DSN_%d_READ_ONLY", i)
 
 		dsn := os.Getenv(dsnKey)
 		if dsn == "" {
@@ -381,6 +383,7 @@ func loadConnections() ([]ConnectionConfig, error) {
 			DSN:         dsn,
 			Description: os.Getenv(descKey),
 			SSL:         ssl,
+			ReadOnly:    getEnvBool(readOnlyKey),
 		}
 		if globalSSH != nil {
 			c.SSH = globalSSH

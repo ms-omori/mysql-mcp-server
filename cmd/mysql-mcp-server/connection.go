@@ -183,6 +183,11 @@ func (cm *ConnectionManager) addConnectionWithPoolConfig(ctx context.Context, co
 	if err != nil {
 		return fmt.Errorf("failed to parse DSN for %s: %w", connCfg.Name, err)
 	}
+	// MYSQL_MCP_STRICT_READ_ONLY forces transaction_read_only=ON on every
+	// connection regardless of per-DSN configuration. The execute tool
+	// explicitly refuses to run when this flag is set so operators who rely on
+	// strict mode as a safety net are not silently bypassed by writes. To
+	// enable the execute tool, unset MYSQL_MCP_STRICT_READ_ONLY.
 	dsn, err = applyStrictReadOnlyDSN(dsn, cfg.StrictReadOnly)
 	if err != nil {
 		return fmt.Errorf("failed to parse DSN for %s: %w", connCfg.Name, err)
@@ -354,6 +359,22 @@ func (cm *ConnectionManager) GetActiveDB() *sql.DB {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.connections[cm.activeConn]
+}
+
+// IsActiveReadOnly reports whether the active connection is flagged as
+// read-only. Returns true when no active connection is registered so callers
+// fail safe (writes refused).
+func (cm *ConnectionManager) IsActiveReadOnly() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.activeConn == "" {
+		return true
+	}
+	cfg, ok := cm.configs[cm.activeConn]
+	if !ok {
+		return true
+	}
+	return cfg.ReadOnly
 }
 
 // Close closes all connections and SSH tunnels managed by the manager.

@@ -513,6 +513,25 @@ func collectStmtReferencedSchemas(stmt sqlparser.Statement, out map[string]struc
 		addSchemaQualifier(out, s.DBName)
 	case *sqlparser.Insert:
 		addSchemaQualifier(out, s.Table.Qualifier)
+		// INSERT ... SELECT and REPLACE ... SELECT reference additional
+		// schemas through the nested SELECT. Collect those too so
+		// allowlist enforcement doesn't silently skip them.
+		if sel, ok := s.Rows.(sqlparser.SelectStatement); ok {
+			collectSelectStatementSchemas(sel, out)
+		}
+		// INSERT ... VALUES rows can contain scalar subqueries that
+		// reference other schemas.
+		if vals, ok := s.Rows.(sqlparser.Values); ok {
+			for _, row := range vals {
+				for _, expr := range row {
+					collectExprSubquerySchemas(expr, out)
+				}
+			}
+		}
+		// ON DUPLICATE KEY UPDATE expressions can contain subqueries.
+		for _, upd := range s.OnDup {
+			collectExprSubquerySchemas(upd.Expr, out)
+		}
 	case *sqlparser.Update:
 		for _, te := range s.TableExprs {
 			collectTableExprSchemas(te, out)
@@ -627,6 +646,188 @@ func ValidateSQLCombined(sqlText string) error {
 		return err
 	}
 
+	return nil
+}
+
+// ValidateWriteSQLWithParser performs AST-based validation for DML write
+// statements. It accepts INSERT, UPDATE, DELETE, and REPLACE (which the Vitess
+// parser represents as *Insert with Action=Replace). Read-only statements and
+// DDL/admin statements are rejected so that the execute tool is not abused for
+// purposes covered by other tools.
+func ValidateWriteSQLWithParser(sqlText string) error {
+	sqlText = strings.TrimSpace(sqlText)
+	if sqlText == "" {
+		return &ParserValidationError{Reason: "empty query"}
+	}
+
+	statements, err := sqlparser.SplitStatementToPieces(sqlText)
+	if err != nil {
+		return &ParserValidationError{
+			Reason:    "failed to parse SQL statement",
+			Statement: err.Error(),
+		}
+	}
+	if len(statements) > 1 {
+		return &ParserValidationError{Reason: "multi-statement queries are not allowed"}
+	}
+	if len(statements) == 0 {
+		return &ParserValidationError{Reason: "empty query"}
+	}
+	sqlText = statements[0]
+
+	stmt, err := sqlparser.Parse(sqlText)
+	if err != nil {
+		return &ParserValidationError{
+			Reason:    "failed to parse SQL statement",
+			Statement: err.Error(),
+		}
+	}
+
+	return validateWriteStatement(stmt)
+}
+
+// validateWriteStatement accepts DML (Insert/Update/Delete/Replace) and rejects
+// everything else — including read-only statements (Select/Show/...) which
+// belong in run_query instead.
+func validateWriteStatement(stmt sqlparser.Statement) error {
+	switch s := stmt.(type) {
+	case *sqlparser.Insert:
+		// *sqlparser.Insert covers both INSERT and REPLACE.
+		return validateInsert(s)
+
+	case *sqlparser.Update:
+		return validateUpdate(s)
+
+	case *sqlparser.Delete:
+		return validateDelete(s)
+
+	// Read-only statements: direct to run_query.
+	case *sqlparser.Select, *sqlparser.ParenSelect, *sqlparser.Show,
+		*sqlparser.OtherRead, *sqlparser.Union, *sqlparser.Use:
+		return &ParserValidationError{
+			Reason: "read-only statements are not allowed in execute; use run_query instead",
+		}
+
+	case *sqlparser.DDL:
+		return &ParserValidationError{
+			Reason:    "DDL statements are not allowed",
+			Statement: s.Action,
+		}
+
+	case *sqlparser.DBDDL:
+		return &ParserValidationError{
+			Reason:    "database DDL statements are not allowed",
+			Statement: s.Action,
+		}
+
+	case *sqlparser.Set:
+		return &ParserValidationError{Reason: "SET statements are not allowed"}
+
+	case *sqlparser.OtherAdmin:
+		return &ParserValidationError{Reason: "administrative statements are not allowed"}
+
+	default:
+		return &ParserValidationError{
+			Reason:    "statement type not allowed",
+			Statement: fmt.Sprintf("%T", stmt),
+		}
+	}
+}
+
+// validateInsert checks the target table, row values, and any INSERT...SELECT
+// subquery for dangerous functions or system-schema access.
+func validateInsert(ins *sqlparser.Insert) error {
+	qualifier := strings.ToLower(ins.Table.Qualifier.String())
+	if qualifier != "" && DangerousSchemas[qualifier] {
+		return &ParserValidationError{
+			Reason:    "access to system schema is not allowed",
+			Statement: qualifier,
+		}
+	}
+
+	// INSERT ... SELECT / REPLACE ... SELECT: validate the nested SELECT.
+	if sel, ok := ins.Rows.(sqlparser.SelectStatement); ok {
+		if err := validateSelectStatement(sel); err != nil {
+			return err
+		}
+	}
+
+	// INSERT ... VALUES: inspect each value expression.
+	if vals, ok := ins.Rows.(sqlparser.Values); ok {
+		for _, row := range vals {
+			for _, expr := range row {
+				if err := checkExprForDangerousFunctions(expr); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// ON DUPLICATE KEY UPDATE clause.
+	for _, upd := range ins.OnDup {
+		if err := checkExprForDangerousFunctions(upd.Expr); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateUpdate checks target tables, SET expressions, and WHERE clause.
+func validateUpdate(upd *sqlparser.Update) error {
+	for _, te := range upd.TableExprs {
+		if err := checkTableExpr(te); err != nil {
+			return err
+		}
+	}
+	for _, expr := range upd.Exprs {
+		if err := checkExprForDangerousFunctions(expr.Expr); err != nil {
+			return err
+		}
+	}
+	if upd.Where != nil {
+		if err := checkExprForDangerousFunctions(upd.Where.Expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateDelete checks target tables and WHERE clause. Multi-table DELETE
+// syntax (`DELETE t1 FROM t1 JOIN t2 ...`) exposes explicit targets in
+// del.Targets, which must also be checked for system-schema qualifiers.
+func validateDelete(del *sqlparser.Delete) error {
+	for _, te := range del.TableExprs {
+		if err := checkTableExpr(te); err != nil {
+			return err
+		}
+	}
+	for _, target := range del.Targets {
+		qualifier := strings.ToLower(target.Qualifier.String())
+		if qualifier != "" && DangerousSchemas[qualifier] {
+			return &ParserValidationError{
+				Reason:    "access to system schema is not allowed",
+				Statement: qualifier,
+			}
+		}
+	}
+	if del.Where != nil {
+		if err := checkExprForDangerousFunctions(del.Where.Expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateWriteSQLCombined runs parser-based and regex-based write validation
+// in defense-in-depth fashion, mirroring ValidateSQLCombined for writes.
+func ValidateWriteSQLCombined(sqlText string) error {
+	if err := ValidateWriteSQLWithParser(sqlText); err != nil {
+		return err
+	}
+	if err := ValidateWriteSQL(sqlText); err != nil {
+		return err
+	}
 	return nil
 }
 

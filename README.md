@@ -14,13 +14,15 @@ This project exposes safe MySQL introspection tools to Claude Desktop via MCP. C
 
 ## Features
 
-- Fully read-only (blocks all non-SELECT/SHOW/DESCRIBE/EXPLAIN)
+- Read-only by default; opt-in DML writes per-connection (`read_only=false`)
+- Defense-in-depth validation: AST parser + regex blocklist for both read and write paths
 - **Multi-DSN Support**: Connect to multiple MySQL or MariaDB instances, switch via tool
 - **MariaDB Support**: Native compatibility with MariaDB 10.x and 11.x
 - **Vector Search** (MySQL 9.0+): Similarity search on vector columns
 - MCP tools:
   - list_databases, list_tables, describe_table
-  - run_query (safe and row-limited)
+  - run_query (read-only, row-limited)
+  - execute (INSERT/UPDATE/DELETE/REPLACE; requires writable connection)
   - ping, server_info
   - list_connections, use_connection (multi-DSN)
   - vector_search, vector_info (MySQL 9.0+)
@@ -130,7 +132,9 @@ Environment variables:
 | MYSQL_MCP_TOKEN_CARD | No | **on** when `MYSQL_MCP_HTTP` is set | **`/status`** live token dashboard + listing in **`GET /api`**; omit to use default **on**; set to **0** to disable |
 | MYSQL_MCP_AUDIT_LOG | No | – | Path to audit log file |
 | MYSQL_MCP_ALLOWED_DATABASES | No | – | Comma-separated schema allowlist (empty = all allowed). With an allowlist, **`run_query`** rejects **`SHOW DATABASES`** / **`SHOW DATABASES LIKE`**—use **`list_databases`**. |
-| MYSQL_MCP_STRICT_READ_ONLY | No | 0 | Set `1` to enable `transaction_read_only=ON` on new connections |
+| MYSQL_MCP_STRICT_READ_ONLY | No | 0 | Set `1` to enable `transaction_read_only=ON` on new connections. Applied only to connections flagged `read_only=true`; writable connections skip this guard. |
+| MYSQL_DSN_READ_ONLY | No | 0 | Set `1` to mark the default `MYSQL_DSN` connection read-only (rejects the `execute` tool). |
+| MYSQL_DSN_{1..10}_READ_ONLY | No | 0 | Per-numbered-DSN read-only flag when using `MYSQL_DSN_N` env var form. |
 | MYSQL_MCP_PROCESS_ADMIN | No | 0 | Set `1` to enable **`process_list`** / **`kill_query`** (extended); **`kill_query`** issues **`KILL QUERY`** (cancels the running statement only, not the connection) |
 | MYSQL_MCP_READ_AUDIT_TOOL | No | 0 | Set `1` to enable `read_audit_log` when audit path is set |
 | MYSQL_MCP_SLOW_QUERY_TOOL | No | 0 | Set `1` to enable `slow_query_log` tool (extended) |
@@ -552,6 +556,40 @@ Optional database context:
 - Enforces row limit
 - Enforces timeout
 - Retries transient connection/network errors with backoff (see **`MYSQL_MCP_DB_RETRY_MAX`**)
+
+### execute
+
+Executes a write DML statement (INSERT / UPDATE / DELETE / REPLACE). Requires the active connection to be **writable**: connections default to writable, and the `execute` tool refuses to run when the active connection is flagged `read_only=true` (via `MYSQL_DSN_READ_ONLY=1`, `MYSQL_DSN_N_READ_ONLY=1`, or `read_only: true` in the config file).
+
+Input:
+
+```json
+{ "sql": "UPDATE users SET status = 'active' WHERE id = 42" }
+```
+
+Optional database context:
+
+```json
+{ "sql": "INSERT INTO audit (actor) VALUES ('mcp')", "database": "myapp" }
+```
+
+Output:
+
+```json
+{
+  "affected_rows": 1,
+  "last_insert_id": 128,
+  "connection": "default"
+}
+```
+
+- Allows only INSERT, UPDATE, DELETE, REPLACE (including `INSERT … SELECT` and `INSERT … ON DUPLICATE KEY UPDATE`)
+- Rejects DDL (CREATE/ALTER/DROP/TRUNCATE), SET, transactions (BEGIN/COMMIT/ROLLBACK), and administrative commands
+- Rejects multi-statement queries and dangerous functions (SLEEP/BENCHMARK/LOAD_FILE/…)
+- Rejects system-schema targets (`mysql.*`, `information_schema.*`, `performance_schema.*`, `sys.*`)
+- Enforces `MYSQL_MCP_ALLOWED_DATABASES` if set
+- Audit-logs every attempt (success or rejection) when `MYSQL_MCP_AUDIT_LOG` is configured
+- Use `run_query` for read-only queries
 
 ### ping
 

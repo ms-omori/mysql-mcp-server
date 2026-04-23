@@ -326,6 +326,17 @@ func registerCoreTools(server *mcp.Server) {
 	}, toolRunQueryWrapped)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name: "execute",
+		Description: "Execute a write SQL statement (INSERT/UPDATE/DELETE/REPLACE only). " +
+			"Requires the active connection to be writable: set read_only=false in the " +
+			"connection config, or unset MYSQL_DSN_READ_ONLY for env-based DSN setups. " +
+			"DDL, transactions, SET, administrative commands, and multi-statement queries " +
+			"are rejected. Always scope UPDATE/DELETE with a specific WHERE clause to " +
+			"avoid unintended mass mutations. Returns affected_rows and last_insert_id. " +
+			"For read-only queries, use run_query instead.",
+	}, toolExecuteWrapped)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ping",
 		Description: "Test database connectivity and measure latency",
 	}, toolPingWrapped)

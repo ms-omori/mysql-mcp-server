@@ -193,6 +193,36 @@ func TestConnectionManagerListEmpty(t *testing.T) {
 	}
 }
 
+func TestIsActiveReadOnlyFailSafes(t *testing.T) {
+	// No active connection -> must fail safe (return true).
+	cm := NewConnectionManager()
+	if !cm.IsActiveReadOnly() {
+		t.Error("IsActiveReadOnly must return true when no active connection is set")
+	}
+
+	// active name set but config missing (corrupted state) -> also fail safe.
+	cm.activeConn = "ghost"
+	if !cm.IsActiveReadOnly() {
+		t.Error("IsActiveReadOnly must return true when active connection has no config")
+	}
+
+	// Registered connection marked read_only=true.
+	cm = NewConnectionManager()
+	cm.configs["ro"] = config.ConnectionConfig{Name: "ro", DSN: "user:pass@tcp(h:3306)/db", ReadOnly: true}
+	cm.activeConn = "ro"
+	if !cm.IsActiveReadOnly() {
+		t.Error("IsActiveReadOnly should be true for a connection marked read_only")
+	}
+
+	// Registered connection marked read_only=false.
+	cm = NewConnectionManager()
+	cm.configs["rw"] = config.ConnectionConfig{Name: "rw", DSN: "user:pass@tcp(h:3306)/db", ReadOnly: false}
+	cm.activeConn = "rw"
+	if cm.IsActiveReadOnly() {
+		t.Error("IsActiveReadOnly should be false for a writable connection")
+	}
+}
+
 func TestConnectionManagerClose(t *testing.T) {
 	cm := NewConnectionManager()
 	// Should not panic when closing empty manager
